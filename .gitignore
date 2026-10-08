@@ -9,3 +9,5 @@ models/
 *.log
 .env
 result
+node_modules/
+dist/
