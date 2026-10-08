@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+launcher="$(readlink -f -- "${BASH_SOURCE[0]}")"
+project_root="$(cd -- "$(dirname -- "$launcher")/.." && pwd)"
+if [[ "${IDIOLECT_NIX:-}" != 1 ]]; then
+  exec nix develop "$project_root" --command bash "$launcher" "$@"
+fi
+source "$project_root/scripts/driver-env.sh"
+export HF_HUB_DISABLE_TELEMETRY=1
+export DO_NOT_TRACK=1
+export TOKENIZERS_PARALLELISM=false
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
+export PYTHONPATH="$project_root${PYTHONPATH:+:$PYTHONPATH}"
+exec uv run --project "$project_root" --frozen python -m idiolect "$@"

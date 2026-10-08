@@ -1,0 +1,46 @@
+[project]
+name = "idiolect"
+version = "0.1.0"
+description = "Your words. Your voice. A local voice cloning CLI powered by Qwen3-TTS."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "qwen-tts==0.1.1",
+  "torch==2.8.0",
+  "torchaudio==2.8.0",
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.30,<1",
+  "python-multipart>=0.0.20,<1",
+  "soundfile>=0.13,<1",
+  "numpy>=1.26,<3",
+  "scipy>=1.15,<2",
+  "huggingface-hub>=0.34,<1",
+  "pydantic>=2.11,<3",
+  "faster-whisper>=1.2,<2",
+  # faster-whisper 1.2 uses metadata_errors, removed by PyAV 19.
+  "av>=11,<19",
+  "httpx>=0.28,<1",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.12,<1"]
+
+[tool.uv]
+package = false
+python-downloads = "never"
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
+torchaudio = { index = "pytorch" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
