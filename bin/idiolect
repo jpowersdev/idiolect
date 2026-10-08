@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Run Idiolect from this checkout through the Nix development shell.
 set -euo pipefail
 launcher="$(readlink -f -- "${BASH_SOURCE[0]}")"
 project_root="$(cd -- "$(dirname -- "$launcher")/.." && pwd)"
@@ -6,11 +7,11 @@ if [[ "${IDIOLECT_NIX:-}" != 1 ]]; then
   exec nix develop "$project_root" --command bash "$launcher" "$@"
 fi
 if [[ "$(uname -s)" == Linux ]]; then
+  # NixOS only: match NVIDIA userspace libraries to the running kernel driver.
   source "$project_root/scripts/driver-env.sh"
 fi
-export HF_HUB_DISABLE_TELEMETRY=1
-export DO_NOT_TRACK=1
-export TOKENIZERS_PARALLELISM=false
-export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
-export PYTHONPATH="$project_root${PYTHONPATH:+:$PYTHONPATH}"
-exec uv run --project "$project_root" --frozen python -m idiolect "$@"
+uv sync --project "$project_root/engine" --frozen --quiet
+(cd "$project_root" && bun install --frozen-lockfile --silent)
+export IDIOLECT_ENGINE="$project_root/engine/.venv/bin/idiolect-engine"
+export IDIOLECT_CHECKOUT="$project_root"
+exec bun "$project_root/src/main.ts" "$@"

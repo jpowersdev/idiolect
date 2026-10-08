@@ -9,19 +9,17 @@
           pkgs = import nixpkgs { inherit system; };
           inherit (pkgs.stdenv.hostPlatform) isLinux;
         in pkgs.mkShell ({
-          # Linux records and plays through PipeWire; macOS records through
-          # FFmpeg's AVFoundation input and plays with the system afplay.
-          packages = with pkgs; [ python312 uv sox libsndfile ]
-            ++ (if isLinux then [ ffmpeg-headless pipewire ] else [ ffmpeg ]);
+          # The same requirements as a manual install: Bun for the CLI, Python 3.12
+          # and uv for the engine, and SoX for the microphone and speakers.
+          packages = with pkgs; [ bun python312 uv sox ];
           IDIOLECT_NIX = "1";
           UV_PYTHON_DOWNLOADS = "never";
           UV_PYTHON = "${pkgs.python312}/bin/python3.12";
           SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
           PYTHONNOUSERSITE = "1";
         } // pkgs.lib.optionalAttrs isLinux {
-          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (with pkgs; [
-            stdenv.cc.cc.lib zlib glib libsndfile
-          ]);
+          # PyPI wheels expect these at the usual FHS locations.
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (with pkgs; [ stdenv.cc.cc.lib zlib glib libsndfile ]);
         });
     in {
       devShells = nixpkgs.lib.genAttrs systems (system: { default = shell system; });
