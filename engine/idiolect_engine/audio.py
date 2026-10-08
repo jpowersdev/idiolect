@@ -1,9 +1,12 @@
 import re
-import subprocess
+from math import gcd
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
+from scipy.signal import resample_poly
+
+REFERENCE_RATE = 24000
 
 
 def split_script(text: str, limit=300):
@@ -42,43 +45,27 @@ def split_script(text: str, limit=300):
 
 
 def prepare_reference(source: Path, output: Path):
-    result = subprocess.run(
-        [
-            "ffmpeg",
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-i",
-            str(source),
-            "-t",
-            "31",
-            "-vn",
-            "-ac",
-            "1",
-            "-ar",
-            "24000",
-            "-c:a",
-            "pcm_s16le",
-            str(output),
-        ],
-        capture_output=True,
-        timeout=40,
-        check=False,
-    )
-    if result.returncode:
-        raise ValueError("That file could not be read as audio. Try a WAV, MP3, M4A, or WebM file.")
-    audio, sr = sf.read(output, dtype="float32")
-    duration = len(audio) / sr
+    """Convert an uploaded reference to the synthesis model's 24 kHz mono format."""
+    try:
+        audio, sample_rate = sf.read(source, dtype="float32", always_2d=True)
+    except (sf.LibsndfileError, RuntimeError) as error:
+        raise ValueError(
+            "That file could not be read as audio. Try a WAV, FLAC, OGG, or MP3 file."
+        ) from error
+    duration = len(audio) / sample_rate
     if not 3 <= duration <= 30:
         raise ValueError(
             "Use a reference between 3 and 30 seconds. A clean 10–15 seconds works well."
         )
+    audio = audio.mean(axis=1)
+    if sample_rate != REFERENCE_RATE:
+        divisor = gcd(REFERENCE_RATE, sample_rate)
+        audio = resample_poly(audio, REFERENCE_RATE // divisor, sample_rate // divisor)
     if not np.isfinite(audio).all() or np.sqrt(np.mean(audio**2)) < 0.0001:
         raise ValueError(
             "This recording is silent or too quiet. Try recording closer to the microphone."
         )
+    sf.write(output, np.clip(audio, -1, 1), REFERENCE_RATE, subtype="PCM_16")
     return round(duration, 2)
 
 
