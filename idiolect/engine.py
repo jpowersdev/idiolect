@@ -12,6 +12,26 @@ log = logging.getLogger(__name__)
 ACTIVE = {"queued", "loading", "generating"}
 
 
+def accelerator():
+    """Use CUDA on Linux and Metal (MPS) on Apple silicon."""
+    import torch
+
+    if torch.cuda.is_available():
+        return "cuda:0"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return None
+
+
+def empty_cache(device):
+    import torch
+
+    if device == "mps":
+        torch.mps.empty_cache()
+    elif device:
+        torch.cuda.empty_cache()
+
+
 class Engine:
     def __init__(self, store):
         self.store = store
@@ -68,14 +88,16 @@ class Engine:
             import torch
             from qwen_tts import Qwen3TTSModel
 
-            if not torch.cuda.is_available():
+            device = accelerator()
+            if device is None:
                 raise RuntimeError(
-                    "CUDA is unavailable. Use bin/idiolect so the matching NVIDIA libraries are selected."
+                    "No GPU is available. On Linux, use bin/idiolect so the matching NVIDIA "
+                    "libraries are selected; on a Mac, use Apple silicon."
                 )
             torch.set_num_threads(8)
             self.model = Qwen3TTSModel.from_pretrained(
                 str(MODEL),
-                device_map="cuda:0",
+                device_map=device,
                 dtype=torch.bfloat16,
                 attn_implementation="sdpa",
                 local_files_only=True,
@@ -147,9 +169,7 @@ class Engine:
             message = str(error)
             if "out of memory" in message.lower():
                 message = "The GPU ran out of memory. Close other GPU apps and try again."
-                import torch
-
-                torch.cuda.empty_cache()
+                empty_cache(accelerator())
             self.store.update_job(job_id, status="failed", message=message[:700])
         finally:
             with self.lock:

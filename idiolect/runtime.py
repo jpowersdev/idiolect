@@ -22,25 +22,33 @@ def main():
         )
         print(f"Model ready: {MODEL}")
     elif args.command == "doctor":
+        import platform
+
         import torch
 
-        available = torch.cuda.is_available()
+        from .engine import accelerator
+
+        device = accelerator()
+        if device == "mps":
+            gpu = f"Apple {platform.machine()} (Metal)"
+        else:
+            gpu = torch.cuda.get_device_name(0) if device else None
         print(
             json.dumps(
                 {
                     "torch": torch.__version__,
                     "cuda": torch.version.cuda,
-                    "gpu_available": available,
-                    "gpu": torch.cuda.get_device_name(0) if available else None,
+                    "gpu_available": device is not None,
+                    "gpu": gpu,
                     "model_downloaded": model_downloaded(),
                     "model_directory": str(MODEL),
                 },
                 indent=2,
             )
         )
-        if not available:
+        if device is None:
             raise SystemExit(1)
-        print("CUDA tensor check:", (torch.ones(4, device="cuda") * 12).tolist())
+        print("GPU tensor check:", (torch.ones(4, device=device) * 12).tolist())
     else:
         import os
 

@@ -91,8 +91,10 @@ class Backend:
         if status is None:
             return False
         pid = status["pid"]
-        command = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
-        if b"idiolect.runtime" not in command or b"serve" not in command:
+        command = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, check=False
+        ).stdout.split()
+        if "idiolect.runtime" not in command or "serve" not in command:
             raise ValueError("The engine was started by another launcher; stop it there.")
         jobs = self.request("GET", "/api/renders")
         if any(job["status"] in {"queued", "loading", "generating"} for job in jobs):

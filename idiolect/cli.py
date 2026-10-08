@@ -112,10 +112,12 @@ def enroll(backend, args):
 
 
 def audio_player():
-    player = shutil.which("pw-play")
+    # macOS ships afplay; Linux plays through PipeWire.
+    name = "afplay" if sys.platform == "darwin" else "pw-play"
+    player = shutil.which(name)
     if player is None:
         raise ValueError(
-            "Playback needs PipeWire's pw-play. Use the idiolect launcher "
+            f"Playback needs {name}. Use the idiolect launcher "
             "or pass -o filename.wav to save the audio."
         )
     return player
@@ -148,7 +150,8 @@ def play_render(backend, job, player):
             check=False,
         )
         if result.returncode:
-            detail = result.stderr.strip() or f"pw-play exited with status {result.returncode}"
+            name = Path(player).name
+            detail = result.stderr.strip() or f"{name} exited with status {result.returncode}"
             raise ValueError(f"Playback failed: {detail}")
 
 
@@ -199,7 +202,11 @@ def parser():
     commands = result.add_subparsers(dest="command")
     setup = commands.add_parser("setup", help="Read a script, save your voice, and hear a preview")
     setup.add_argument("--name", default="Me", help="Name for this voice (default: Me)")
-    setup.add_argument("--device", help="PipeWire microphone name or ID (see wpctl status --name)")
+    setup.add_argument(
+        "--device",
+        help="Microphone name or ID: on Linux see wpctl status --name; on macOS see "
+        'ffmpeg -f avfoundation -list_devices true -i ""',
+    )
     speech = commands.add_parser("say", help="Speak text aloud, or save a WAV with --output")
     speech.add_argument("text", nargs="*")
     speech.add_argument("-f", "--file", help="Read a script from a text file, or - for stdin")

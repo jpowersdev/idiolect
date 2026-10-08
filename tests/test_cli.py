@@ -246,7 +246,7 @@ def test_say_plays_or_saves_audio(monkeypatch, tmp_path, capsys, save):
 
 def test_say_checks_for_player_before_starting_engine(monkeypatch):
     monkeypatch.setattr(cli.shutil, "which", lambda _: None)
-    with pytest.raises(ValueError, match="pw-play"):
+    with pytest.raises(ValueError, match="Playback needs"):
         cli.say(None, cli.parser().parse_args(["say", "Hello"]))
 
 

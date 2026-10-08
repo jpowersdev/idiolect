@@ -6,6 +6,7 @@ import selectors
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -158,7 +159,31 @@ def stop_recorder(process):
             process.wait()
 
 
-def record_reading(script, output: Path, reader, progress, device=None):
+def recorder_command(device=None):
+    """Stream mono 16-bit microphone samples to stdout."""
+    if sys.platform == "darwin":
+        executable = shutil.which("ffmpeg")
+        if not executable:
+            raise ValueError("Recording needs FFmpeg. Start with the idiolect launcher.")
+        # AVFoundation takes "video:audio"; an empty video selector records audio only.
+        return [
+            executable,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "avfoundation",
+            "-i",
+            f":{device or 'default'}",
+            "-ac",
+            "1",
+            "-ar",
+            str(SAMPLE_RATE),
+            "-f",
+            "s16le",
+            "-",
+        ]
     executable = shutil.which("pw-record")
     if not executable:
         raise ValueError("PipeWire recording is unavailable. Start with the idiolect launcher.")
@@ -175,6 +200,11 @@ def record_reading(script, output: Path, reader, progress, device=None):
     if device:
         command.extend(["--target", device])
     command.append("-")
+    return command
+
+
+def record_reading(script, output: Path, reader, progress, device=None):
+    command = recorder_command(device)
     with tempfile.TemporaryFile() as errors, ThreadPoolExecutor(max_workers=1) as pool:
         process = subprocess.Popen(
             command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errors, bufsize=0
@@ -227,6 +257,14 @@ def record_reading(script, output: Path, reader, progress, device=None):
                             recognition_audio(snapshot.astype(np.float32) / 32768),
                         )
                         last_submission = now
+            if raw and not any(raw):
+                hint = (
+                    " On macOS, allow your terminal app in System Settings > Privacy & Security"
+                    " > Microphone, then restart it."
+                    if sys.platform == "darwin"
+                    else ""
+                )
+                raise ValueError(f"The microphone only returned silence.{hint}")
             raise ValueError(
                 f"Recognized {last_match.matched}/{last_match.total} words before the time limit. "
                 "Check your microphone and read the whole script again."

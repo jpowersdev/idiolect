@@ -6,9 +6,12 @@ A local voice cloning CLI. Read a passage once, then turn written text into spee
 
 Written in Python 3.12 with `argparse`, Qwen3-TTS for synthesis, and faster-whisper for following your recording. A local background engine keeps the speech model loaded between commands. This repository contains the CLI and that engine; it has no browser UI.
 
-## Get started on NixOS
+## Get started
 
-Requires x86_64 Linux, an NVIDIA GPU with a loaded driver, Nix with flakes enabled, and PipeWire for recording and playback. Developed and tested on an RTX 4080 SUPER with 16 GB VRAM.
+Idiolect runs on two platforms from the same checkout, both through Nix with flakes enabled:
+
+- **NixOS / x86_64 Linux:** an NVIDIA GPU with a loaded driver, and PipeWire for recording and playback. Developed and tested on an RTX 4080 SUPER with 16 GB VRAM.
+- **macOS on Apple silicon:** synthesis runs on the GPU through Metal (MPS). Recording uses FFmpeg's AVFoundation input; playback uses the built-in `afplay`. The first recording asks for microphone access for your terminal app.
 
 ```sh
 git clone git@github.com:jpowersdev/idiolect.git
@@ -20,7 +23,7 @@ cd idiolect
 ./bin/idiolect say "Save this voiceover to a file." -o hello.wav
 ```
 
-The launcher enters the pinned Nix development shell, installs the locked Python dependencies, and selects NVIDIA libraries matching the running kernel driver. The first setup downloads several GB of dependencies and model weights. Synthesis and speech recognition then run locally.
+The launcher enters the pinned Nix development shell and installs the locked Python dependencies: CUDA PyTorch on Linux, the standard Metal-enabled PyTorch on macOS. On Linux it also selects NVIDIA libraries matching the running kernel driver. The first setup downloads several GB of dependencies and model weights. Synthesis and speech recognition then run locally.
 
 Optionally put the command on your `PATH`:
 
@@ -39,7 +42,7 @@ Setup trims the recording around your speech and saves the recognized transcript
 
 Recording uses 48 kHz audio. A separate 16 kHz copy goes to recognition; the saved voice reference is converted directly to the synthesis model's 24 kHz format. Broad sound coverage helps provide a representative sample, but does not guarantee accent or delivery accuracy. Setup creates a reference for cloning; it does not fine-tune model weights.
 
-Guided recording currently uses English and your default PipeWire microphone. Use `idiolect setup --device NAME_OR_ID` to choose another microphone; `wpctl status --name` lists devices. Speech recognition runs locally on the CPU.
+Guided recording currently uses English and your default microphone. Use `idiolect setup --device NAME_OR_ID` to choose another one. On Linux, `wpctl status --name` lists PipeWire devices; on macOS, `ffmpeg -f avfoundation -list_devices true -i ""` (inside `nix develop`) lists audio devices by index and name. Speech recognition runs locally on the CPU.
 
 ## Commands
 
@@ -76,7 +79,7 @@ Use a different port when another checkout is running, for example `./bin/idiole
 - `models/qwen3-tts-1.7b-base/`: synthesis model.
 - `models/whisper-base.en/`: reading recognition model.
 
-`data/`, `models/`, and `.venv/` are ignored by Git. Back up `data/` to preserve your recordings and renders. Model and dependency downloads use the network; recordings and text are processed on your own machine.
+`data/`, `models/`, and `.venv/` are ignored by Git and stay on each machine. To use the same voices on another computer, copy `data/voices/` and `data/cli.json` across; run `idiolect download` once per machine for the models. Back up `data/` to preserve your recordings and renders. Model and dependency downloads use the network; recordings and text are processed on your own machine.
 
 Optional environment variables: `IDIOLECT_DATA` changes the data directory, `IDIOLECT_MODEL` selects a local Qwen3-TTS Base model, and `IDIOLECT_ASR_MODEL` selects a local faster-whisper model. `OMP_NUM_THREADS` controls the runtime thread environment.
 
@@ -89,7 +92,7 @@ nix develop --command uv run --frozen ruff check idiolect tests
 
 The tests cover recording completion, audio preservation, playback and file output, storage, API validation, cancellation, and engine ownership without loading the GPU model.
 
-The CLI uses `argparse`; FastAPI and Uvicorn provide the local engine connection. Model generation runs through PyTorch with CUDA, BF16, and SDPA attention. FlashAttention compilation is not required.
+The CLI uses `argparse`; FastAPI and Uvicorn provide the local engine connection. Model generation runs through PyTorch with BF16 and SDPA attention, on CUDA or Metal. FlashAttention compilation is not required.
 
 Upstream models and libraries:
 

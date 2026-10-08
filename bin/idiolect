@@ -5,7 +5,9 @@ project_root="$(cd -- "$(dirname -- "$launcher")/.." && pwd)"
 if [[ "${IDIOLECT_NIX:-}" != 1 ]]; then
   exec nix develop "$project_root" --command bash "$launcher" "$@"
 fi
-source "$project_root/scripts/driver-env.sh"
+if [[ "$(uname -s)" == Linux ]]; then
+  source "$project_root/scripts/driver-env.sh"
+fi
 export HF_HUB_DISABLE_TELEMETRY=1
 export DO_NOT_TRACK=1
 export TOKENIZERS_PARALLELISM=false
