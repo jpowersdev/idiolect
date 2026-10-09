@@ -4,42 +4,71 @@
 
 A local voice cloning CLI. Read a passage once, then turn written text into speech in your voice. Guided recording follows your words and stops automatically. Generated speech plays by default, or saves to a WAV when you pass `--output`.
 
-Written in Python 3.12 with `argparse`, Qwen3-TTS for synthesis, and faster-whisper for following your recording. A local background engine keeps the speech model loaded between commands. This repository contains the CLI and that engine; it has no browser UI.
+Idiolect has two parts that talk over a private HTTP connection on `127.0.0.1`:
 
-## Get started on NixOS
+- **The CLI** (`src/`), written in TypeScript with [Effect](https://effect.website). It handles commands, your microphone and speakers, guided recording, and output files.
+- **The speech engine** (`engine/`), a Python package that runs [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) for synthesis and [faster-whisper](https://github.com/SYSTRAN/faster-whisper) for following your reading. It stays running in the background so the model remains loaded between commands.
 
-Requires x86_64 Linux, an NVIDIA GPU with a loaded driver, Nix with flakes enabled, and PipeWire for recording and playback. Developed and tested on an RTX 4080 SUPER with 16 GB VRAM.
+Their contract is defined once, as an Effect `HttpApi`, in `src/Api.ts`. Any engine that implements it can replace the Python one.
+
+## Requirements
+
+Idiolect does not detect or install system software for you. Install these yourself:
+
+| Requirement | Used for | Notes |
+| --- | --- | --- |
+| A GPU that PyTorch supports | Synthesis | An NVIDIA GPU with a working driver on Linux (CUDA 12.8 wheels), or an Apple silicon Mac (Metal). Developed on an RTX 4080 SUPER (16 GB) and an M5 Pro. `idiolect doctor` checks yours. |
+| [uv](https://docs.astral.sh/uv/) | Installing the engine | uv fetches Python 3.12 if you do not have it. |
+| [Bun](https://bun.sh) 1.3+ | Building or running the CLI | Not needed at runtime if you use a compiled binary. |
+| [SoX](https://sox.sourceforge.net) | Microphone and playback | `brew install sox`, `apt install sox`, or your distribution's package. It uses your default devices: CoreAudio on macOS, PulseAudio or ALSA on Linux. Not needed if you only save files with `-o`. |
+
+Windows is untested. The model download is about 4.5 GB.
+
+## Install
+
+From a checkout:
 
 ```sh
-git clone git@github.com:jpowersdev/idiolect.git
+git clone https://github.com/jpowersdev/idiolect.git
 cd idiolect
-./bin/idiolect download
-./bin/idiolect doctor
-./bin/idiolect setup --name Me
-./bin/idiolect say "Here is something I have never recorded myself saying."
-./bin/idiolect say "Save this voiceover to a file." -o hello.wav
+
+# The engine: puts idiolect-engine on your PATH (~/.local/bin).
+uv tool install ./engine
+
+# The CLI: a single executable with no runtime dependencies.
+bun install
+bun run build
+cp dist/idiolect ~/.local/bin/
+
+idiolect download   # speech and reading models, once
+idiolect doctor     # check the GPU and models
+idiolect setup --name Me
+idiolect say "Here is something I have never recorded myself saying."
+idiolect say "Save this voiceover to a file." -o hello.wav
 ```
 
-The launcher enters the pinned Nix development shell, installs the locked Python dependencies, and selects NVIDIA libraries matching the running kernel driver. The first setup downloads several GB of dependencies and model weights. Synthesis and speech recognition then run locally.
+Set `IDIOLECT_ENGINE` to the engine's path if `idiolect-engine` is not on your `PATH`.
 
-Optionally put the command on your `PATH`:
+### With Nix
+
+If you use Nix with flakes, `./bin/idiolect` needs nothing else installed. It enters the pinned development shell, which provides Bun, Python, uv, and SoX, then syncs the locked dependencies and runs the CLI from source:
 
 ```sh
-mkdir -p ~/.local/bin
-ln -s "$PWD/bin/idiolect" ~/.local/bin/idiolect
+./bin/idiolect download
+./bin/idiolect setup --name Me
 ```
 
-Ensure `~/.local/bin` is on your `PATH`. You can also keep using `./bin/idiolect` directly. `python -m idiolect` exposes the same CLI inside the development environment.
+On NixOS it also selects the NVIDIA userspace libraries that match the running kernel driver, since a `nixos-rebuild switch` can leave them out of step until you reboot. Optionally link it onto your `PATH` with `ln -s "$PWD/bin/idiolect" ~/.local/bin/idiolect`.
 
 ## Record your voice
 
-Run `idiolect setup`, or just `idiolect`. It displays an original 56-word passage and waits for Enter to start recording. Read the entire passage in your normal conversational voice, allowing roughly 20–25 seconds. The local recognizer follows your words in order and stops after two recognition passes confirm the full reading. You only read the passage once.
+Run `idiolect setup`, or just `idiolect`. It displays an original 56-word passage and waits for Enter to start recording. Read the entire passage in your normal conversational voice, allowing roughly 20–25 seconds. The engine's recognizer follows your words in order, and recording stops after two recognition passes confirm the full reading. You only read the passage once.
 
-Setup trims the recording around your speech and saves the recognized transcript, including fillers. If the reading is incomplete after 45 seconds, it offers a retry without saving a partial voice. The saved reference must be 3–30 seconds long. Setup then generates and plays new sentences so you can judge the likeness. A new setup recording creates another voice and makes it the default.
+Setup trims the recording around your speech and saves the recognized transcript, including fillers. If the reading is incomplete after 45 seconds, it offers a retry without saving a partial voice. If the microphone only delivers silence, setup says so within a few seconds. On macOS this usually means your terminal app needs permission in System Settings → Privacy & Security → Microphone. Setup then generates and plays new sentences so you can judge the likeness. A new setup recording creates another voice and makes it the default.
 
-Recording uses 48 kHz audio. A separate 16 kHz copy goes to recognition; the saved voice reference is converted directly to the synthesis model's 24 kHz format. Broad sound coverage helps provide a representative sample, but does not guarantee accent or delivery accuracy. Setup creates a reference for cloning; it does not fine-tune model weights.
+Recording uses 48 kHz audio. The engine makes its own 16 kHz copy for recognition and converts the saved reference to the synthesis model's 24 kHz format. Setup creates a reference for cloning; it does not fine-tune model weights.
 
-Guided recording currently uses English and your default PipeWire microphone. Use `idiolect setup --device NAME_OR_ID` to choose another microphone; `wpctl status --name` lists devices. Speech recognition runs locally on the CPU.
+Guided recording currently uses English and your default microphone. To choose another, pass `idiolect setup --device NAME`, which SoX receives as `AUDIODEV`: a CoreAudio device name on macOS, or a PulseAudio source or ALSA device on Linux. Only clone voices you have permission to use.
 
 ## Commands
 
@@ -57,42 +86,46 @@ idiolect stop                                     # Release GPU memory when idle
 idiolect serve                                    # Run the engine in the foreground
 idiolect download
 idiolect doctor
+idiolect --completions zsh                        # Shell completions
 ```
 
 `--voice` accepts a saved name, full ID, or unambiguous ID prefix. Input and output paths are relative to your current directory. Existing output files are protected unless you pass `--force`. Saved paths go to stdout; generation progress goes to stderr.
 
-Without `--output`, playback waits until the audio finishes. Ctrl+C stops playback. During generation, Ctrl+C cancels your render after the current section. Completed audio remains in the local render history. Long text is split at sentence boundaries where possible and joined with short pauses.
+Without `--output`, playback waits until the audio finishes. During generation, Ctrl+C cancels your render after the current section. Completed audio remains in the local render history. Long text is split at sentence boundaries where possible and joined with short pauses.
 
-## Local engine and files
+## The engine and your files
 
-The CLI starts its engine automatically and reuses it for later commands. The engine listens only on `127.0.0.1:7860`; it provides a private local HTTP API for the CLI, with no browser interface. `idiolect stop` refuses to interrupt an active render.
+The CLI starts the engine automatically and reuses it for later commands. The engine listens only on `127.0.0.1:7860` and refuses requests from browsers. `idiolect stop` refuses to interrupt an active render. Use `--port` for a second engine, and pass the same `--port` to later commands. Only one engine may use a given voice library.
 
-Use a different port when another checkout is running, for example `./bin/idiolect --port 7861 setup`. Pass the same global `--port` option to subsequent commands. Only one engine may use a given data directory.
+Everything lives in one per-user directory: `~/Library/Application Support/idiolect` on macOS, and `$XDG_DATA_HOME/idiolect` (usually `~/.local/share/idiolect`) on Linux.
 
-- `data/voices/`: recordings and exact transcripts.
-- `data/renders/`: scripts, progress, and generated WAV files.
-- `data/cli.json`: your default voice.
-- `data/engine.log`: background engine output.
+- `voices/`: recordings and exact transcripts.
+- `renders/`: scripts, progress, and generated WAV files.
+- `cli.json`: your default voice.
+- `engine.log`: background engine output.
 - `models/qwen3-tts-1.7b-base/`: synthesis model.
 - `models/whisper-base.en/`: reading recognition model.
 
-`data/`, `models/`, and `.venv/` are ignored by Git. Back up `data/` to preserve your recordings and renders. Model and dependency downloads use the network; recordings and text are processed on your own machine.
+Back up `voices/` and `cli.json` to preserve your voices; copy them to another computer to use the same voices there. Model and dependency downloads use the network; recordings and text are processed on your own machine.
 
-Optional environment variables: `IDIOLECT_DATA` changes the data directory, `IDIOLECT_MODEL` selects a local Qwen3-TTS Base model, and `IDIOLECT_ASR_MODEL` selects a local faster-whisper model. `OMP_NUM_THREADS` controls the runtime thread environment.
+Optional environment variables: `IDIOLECT_DATA` moves the voice library, `IDIOLECT_MODELS` moves the models, and `IDIOLECT_ENGINE` selects the engine executable. The engine also honors `IDIOLECT_MODEL` and `IDIOLECT_ASR_MODEL` for individual local models. `OMP_NUM_THREADS` controls the runtime thread environment.
+
+Earlier versions kept `data/` and `models/` inside the checkout. `./bin/idiolect` moves them to the per-user directory the first time it runs, without replacing anything already there.
 
 ## Development
 
 ```sh
-nix develop --command uv run --frozen pytest -q
-nix develop --command uv run --frozen ruff check idiolect tests
+bun test                 # CLI tests, plus the contract test against engine/.venv
+bun run typecheck
+cd engine && uv run --frozen pytest -q && uv run --frozen ruff check .
 ```
 
-The tests cover recording completion, audio preservation, playback and file output, storage, API validation, cancellation, and engine ownership without loading the GPU model.
+Run these inside `nix develop` if you use Nix. `bun test` includes a contract test: it starts the real engine HTTP server, with stand-ins for the models, and exercises every endpoint through the typed Effect client, so the two sides cannot drift apart. It is skipped when `engine/.venv` does not exist yet; run `uv sync` in `engine/` first.
 
-The CLI uses `argparse`; FastAPI and Uvicorn provide the local engine connection. Model generation runs through PyTorch with CUDA, BF16, and SDPA attention. FlashAttention compilation is not required.
+The engine generates speech through PyTorch with BF16 and SDPA attention, on CUDA or Metal. FlashAttention compilation is not required.
 
 Upstream models and libraries:
 
 - [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS), Apache 2.0. The 1.7B Base model is pinned to `fd4b254389122332181a7c3db7f27e918eec64e3`.
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) and [Whisper base.en](https://huggingface.co/Systran/faster-whisper-base.en), MIT. The reading model is pinned to `fad79c08a643e3aa623adfae1c1861e50438482d`.
-- `flake.lock` and `uv.lock` pin the system and Python dependencies.
+- `bun.lock`, `engine/uv.lock`, and `flake.lock` pin the CLI, engine, and system dependencies.

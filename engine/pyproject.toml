@@ -1,10 +1,11 @@
 [project]
-name = "idiolect"
-version = "0.1.0"
-description = "Your words. Your voice. A local voice cloning CLI powered by Qwen3-TTS."
+name = "idiolect-engine"
+version = "0.2.0"
+description = "Idiolect's local speech engine: Qwen3-TTS voice cloning and faster-whisper reading."
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "qwen-tts==0.1.1",
+  # PyPI wheels use CUDA 12.8 on Linux and Metal (MPS) on Apple silicon.
   "torch==2.8.0",
   "torchaudio==2.8.0",
   "fastapi>=0.115,<1",
@@ -18,28 +19,23 @@ dependencies = [
   "faster-whisper>=1.2,<2",
   # faster-whisper 1.2 uses metadata_errors, removed by PyAV 19.
   "av>=11,<19",
-  "httpx>=0.28,<1",
 ]
 
+[project.scripts]
+idiolect-engine = "idiolect_engine.runtime:main"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["idiolect_engine"]
+
 [dependency-groups]
-dev = ["pytest>=8,<10", "ruff>=0.12,<1"]
-
-[tool.uv]
-package = false
-python-downloads = "never"
-
-[[tool.uv.index]]
-name = "pytorch"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
-
-[tool.uv.sources]
-torch = { index = "pytorch" }
-torchaudio = { index = "pytorch" }
+dev = ["pytest>=8,<10", "ruff>=0.12,<1", "httpx>=0.28,<1"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100

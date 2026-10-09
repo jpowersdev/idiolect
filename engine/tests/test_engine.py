@@ -4,50 +4,36 @@ import re
 import numpy as np
 import pytest
 import soundfile as sf
+from fakes import FakeRecognizer, IdleEngine
 from fastapi.testclient import TestClient
 
-from idiolect.audio import join_audio, split_script
-from idiolect.engine import Engine
-from idiolect.server import create_app
-from idiolect.storage import Store
+from idiolect_engine.audio import join_audio, split_script
+from idiolect_engine.config import MODEL_ID
+from idiolect_engine.engine import Engine
+from idiolect_engine.recognizer import ASR_SAMPLE_RATE, recognition_audio
+from idiolect_engine.server import create_app
+from idiolect_engine.storage import Store
 
-
-class IdleEngine:
-    """Exercise HTTP validation/storage without running the GPU during unit tests."""
-
-    def __init__(self, store):
-        self.store = store
-
-    def status(self):
-        return {"model_downloaded": True, "model_status": "idle", "local": True}
-
-    def recover(self):
-        pass
-
-    def submit(self, voice, text, language, seed):
-        return self.store.create_job(voice, text, language, seed, split_script(text))
-
-    def cancel(self, job_id):
-        return self.store.update_job(job_id, status="cancelled")
-
-    def shutdown(self):
-        pass
+LOCAL = "http://127.0.0.1:7860"
 
 
 @pytest.fixture
 def client(tmp_path):
-    with TestClient(create_app(tmp_path, IdleEngine)) as client:
+    shutdowns = []
+    app = create_app(tmp_path, IdleEngine, FakeRecognizer(), lambda: shutdowns.append(True))
+    app.state.shutdowns = shutdowns
+    with TestClient(app, base_url=LOCAL) as client:
         yield client
 
 
-def wave_bytes(seconds=4, silent=False):
+def wave_bytes(seconds=4, silent=False, rate=24000):
     buffer = io.BytesIO()
     samples = (
-        np.zeros(int(seconds * 24000))
+        np.zeros(int(seconds * rate))
         if silent
-        else (0.2 * np.sin(2 * np.pi * 220 * np.arange(int(seconds * 24000)) / 24000))
+        else (0.2 * np.sin(2 * np.pi * 220 * np.arange(int(seconds * rate)) / rate))
     )
-    sf.write(buffer, samples, 24000, format="WAV")
+    sf.write(buffer, samples, rate, format="WAV")
     return buffer.getvalue()
 
 
@@ -86,6 +72,12 @@ def test_voice_persists_and_normalized_audio_is_readable(client):
     reference = client.app.state.store.voice_path(voice["id"]) / "reference.wav"
     data, sr = sf.read(reference)
     assert sr == 24000 and data.ndim == 1 and len(data) == 4 * sr
+
+
+def test_recorded_48k_reference_is_converted_for_the_model(client):
+    voice = upload(client, wave_bytes(5, rate=48000)).json()
+    data, sr = sf.read(client.app.state.store.voice_path(voice["id"]) / "reference.wav")
+    assert sr == 24000 and len(data) == 5 * sr and voice["duration"] == 5
 
 
 @pytest.mark.parametrize(
@@ -159,8 +151,75 @@ def test_join_audio_preserves_sections_and_adds_pause(tmp_path):
 
 def test_two_servers_cannot_use_the_same_voice_data(tmp_path):
     with (
-        TestClient(create_app(tmp_path, IdleEngine)),
+        TestClient(create_app(tmp_path, IdleEngine), base_url=LOCAL),
         pytest.raises(RuntimeError, match="already running"),
-        TestClient(create_app(tmp_path, IdleEngine)),
+        TestClient(create_app(tmp_path, IdleEngine), base_url=LOCAL),
     ):
         pass
+
+
+def test_errors_are_plain_messages(client):
+    response = client.post("/api/generate", json={"voice_id": "0" * 32, "text": "Hi", "seed": -1})
+    assert response.status_code == 422
+    assert isinstance(response.json()["detail"], str) and "seed" in response.json()["detail"]
+
+
+def test_status_reports_contract_version(client):
+    status = client.get("/api/status").json()
+    assert status["service"] == "idiolect" and status["api"] == 1
+    assert "recognizer_downloaded" in status
+
+
+def test_browser_and_rebound_requests_are_refused(tmp_path):
+    with TestClient(create_app(tmp_path, IdleEngine), base_url="http://evil.example") as other:
+        assert other.get("/api/status").status_code == 403
+    with TestClient(create_app(tmp_path, IdleEngine), base_url=LOCAL) as local:
+        response = local.post("/api/shutdown", headers={"Origin": "https://evil.example"})
+        assert response.status_code == 403
+
+
+def test_transcribe_accepts_raw_pcm(client):
+    pcm = (np.full(48000, 0.25) * 32768).astype("<i2").tobytes()
+    response = client.post(
+        "/api/transcribe",
+        params={"sample_rate": 48000},
+        content=pcm,
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    assert response.json() == {"words": [{"text": " Hello", "start": 0.5, "end": 0.9}]}
+    audio, rate = client.app.state.recognizer.calls[-1]
+    assert rate == 48000 and len(audio) == 48000 and np.allclose(audio, 0.25)
+
+
+def test_shutdown_waits_for_active_renders(client):
+    voice = upload(client).json()
+    job = client.post("/api/generate", json={"voice_id": voice["id"], "text": "Hi."}).json()
+    assert client.post("/api/shutdown").status_code == 409
+    client.post(f"/api/renders/{job['id']}/cancel")
+    assert client.post("/api/shutdown").status_code == 202
+    assert client.app.state.shutdowns == [True]
+
+
+def test_recognition_copy_is_anti_aliased():
+    rate = 48000
+    time = np.arange(rate * 6) / rate
+    audio = (0.2 * np.sin(2 * np.pi * 500 * time) + 0.1 * np.sin(2 * np.pi * 10000 * time)).astype(
+        np.float32
+    )
+    original = audio.copy()
+    recognition = recognition_audio(audio, rate)
+    assert len(recognition) == ASR_SAMPLE_RATE * 6
+    assert np.array_equal(audio, original)
+    # A proper downsample removes the 10 kHz tone rather than folding it into ASR's band.
+    expected = 0.2 * np.sin(2 * np.pi * 500 * np.arange(len(recognition)) / ASR_SAMPLE_RATE)
+    assert np.sqrt(np.mean((recognition[100:-100] - expected[100:-100]) ** 2)) < 0.001
+
+
+def test_real_engine_status_matches_the_stand_in(tmp_path):
+    """The CLI decodes these fields; keep the GPU engine and its stand-in in step."""
+    engine = Engine(Store(tmp_path))
+    try:
+        assert engine.status().keys() == IdleEngine(None).status().keys()
+        assert engine.status()["model"] == MODEL_ID
+    finally:
+        engine.shutdown()
