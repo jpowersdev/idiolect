@@ -1,1 +1,1 @@
-"""Idiolect. Your words. Your voice."""
+"""Idiolect's local speech engine."""

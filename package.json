@@ -1,15 +1,17 @@
 {
   "name": "idiolect",
   "version": "0.2.0",
-  "description": "Your words. Your voice. A local voice cloning CLI.",
+  "description": "Local voice cloning from the terminal",
   "private": true,
   "type": "module",
   "bin": {
     "idiolect": "src/main.ts"
   },
+  "files": [
+    "src"
+  ],
   "scripts": {
     "start": "bun src/main.ts",
-    "build": "bun build src/main.ts --compile --outfile dist/idiolect",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

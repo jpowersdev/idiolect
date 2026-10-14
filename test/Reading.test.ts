@@ -1,47 +1,56 @@
 import { describe, expect, test } from "bun:test"
-import { encodeWav, matchReading, pcmSamples, SampleRate, saveReading } from "../src/Reading.ts"
+import { encodeWav, findEnding, pcmSamples, sameWord, SampleRate, saveReading } from "../src/Reading.ts"
 import { words } from "./support.ts"
 
-describe("following a reading", () => {
-  test("requires all words in order", () => {
-    const script = "A warm cup of coffee waited beside a blue notebook."
-    expect(matchReading(script, words(script.toUpperCase())).complete).toBe(true)
-    for (
-      const incomplete of [
-        "",
-        "A warm cup of coffee",
-        "beside a blue notebook",
-        "A warm cup of coffee waited beside a notebook",
-        "A warm cup of coffee waited beside a red notebook",
-        "notebook blue a beside waited coffee of cup warm A"
-      ]
-    ) {
-      expect(matchReading(script, incomplete ? words(incomplete) : []).complete).toBe(false)
+const script = "Then she put on a plain yellow dress, picked up her kit and headed for work."
+
+describe("hearing the end of a reading", () => {
+  test("the script's final words, at the end of what was heard, finish it", () => {
+    expect(findEnding(script, words("up her kit and headed for work."))).toEqual({ done: true, lastWord: 6 })
+    expect(findEnding(script, words("UP HER KIT AND HEADED FOR WORK"))).toMatchObject({ done: true })
+    // The recognizer repeating the last words into the silence afterwards is kept out too.
+    expect(findEnding(script, words("and headed for work. work."))).toEqual({ done: true, lastWord: 3 })
+    expect(findEnding(script, words("kit and headed for work. headed for work."))).toEqual({ done: true, lastWord: 4 })
+    // Words said after the ending are kept out of the reading.
+    expect(findEnding(script, words("and headed for work. Okay, done."))).toEqual({ done: true, lastWord: 3 })
+  })
+
+  test("anything short of the ending keeps listening", () => {
+    for (const heard of ["", "Then she put on a plain yellow dress", "picked up her kit and headed for", "work for headed and kit"]) {
+      expect(findEnding(script, heard ? words(heard) : []).done).toBe(false)
     }
   })
 
-  test("reports a missing word even when the ending was spoken", () => {
-    const match = matchReading("A quiet morning by the river.", words("A morning by the river."))
-    expect(match).toMatchObject({ matched: 5, total: 6, complete: false })
-    expect(match.nextWords.startsWith("quiet")).toBe(true)
+  test("one misheard word in the ending is fine", () => {
+    expect(findEnding(script, words("her kit and hoarded for work."))).toEqual({ done: true, lastWord: 5 })
+    // A misheard final word counts once something was heard in its place.
+    expect(findEnding(script, words("her kit and headed for walk."))).toEqual({ done: true, lastWord: 5 })
+    expect(findEnding(script, words("her kit and headed for")).done).toBe(false)
   })
 
-  test("keeps heard fillers and trims outside the reading", () => {
-    const script = "A quiet morning beside the blue river."
-    const heard = words("Ready. A quiet morning um beside the blue river. Thanks.")
-    const match = matchReading(script, heard)
-    expect(match.complete).toBe(true)
-    const saved = saveReading(new Int16Array(SampleRate * 9).fill(3277), heard, match)
+  test("the recognizer's own spellings count as the script's words", () => {
+    expect(sameWord("sarah", "sara")).toBe(true)
+    expect(sameWord("grey", "gray")).toBe(true)
+    expect(sameWord("harrison", "harrisson")).toBe(true)
+    expect(sameWord("work", "walk")).toBe(false)
+    expect(sameWord("cat", "cut")).toBe(false)
+  })
+})
+
+describe("saving a reading", () => {
+  test("trims from the first heard word through the ending, keeping fillers", () => {
+    const heard = words("A quiet morning um beside the blue river. Thanks.")
+    const saved = saveReading(new Int16Array(SampleRate * 9).fill(3277), heard, 7)
     expect(saved.transcript).toBe("A quiet morning um beside the blue river.")
     expect(saved.duration).toBe(4.6)
-    expect(pcmSamples(saved.wav.subarray(44)).length).toBe(Math.round(4.6 * SampleRate))
+    expect(Math.abs(pcmSamples(saved.wav.subarray(44)).length - 4.6 * SampleRate)).toBeLessThanOrEqual(1)
+    // Word timings are relative to the trimmed clip, which starts 0.25s before "A".
+    expect(saved.words[0]).toEqual({ text: "A", start: 0.25, end: 0.75 })
+    expect(saved.words.at(-1)).toEqual({ text: "river.", start: 3.75, end: 4.25 })
   })
 
-  test("never saves an incomplete reading", () => {
-    const heard = words("A quiet morning")
-    expect(() =>
-      saveReading(new Int16Array(SampleRate * 5), heard, matchReading("A quiet morning beside the river.", heard))
-    ).toThrow("full script")
+  test("nothing heard is never saved", () => {
+    expect(() => saveReading(new Int16Array(SampleRate * 5), [], 0)).toThrow("Nothing was recognized")
   })
 })
 

@@ -1,12 +1,26 @@
 import logging
+import shutil
+import tempfile
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import soundfile as sf
 
-from .audio import join_audio, split_script
-from .config import MODEL, MODEL_ID, model_downloaded
+from .audio import (
+    coverage,
+    cut_after,
+    ending_fade,
+    ends_sentence,
+    join_audio,
+    speech_end,
+    split_script,
+)
+from .config import SEED
+from .models import choose
+from .models import load as load_model
 
 log = logging.getLogger(__name__)
 ACTIVE = {"queued", "loading", "generating"}
@@ -32,135 +46,207 @@ def empty_cache(device):
         torch.cuda.empty_cache()
 
 
+class Renders:
+    """Renders live in memory, with their audio in a temporary folder, for one engine run."""
+
+    KEEP = 8
+
+    def __init__(self):
+        self.folder = Path(tempfile.mkdtemp(prefix="idiolect-renders-"))
+        self.lock = threading.RLock()
+        self.jobs = {}
+
+    def create(self, text, sections):
+        job_id = uuid.uuid4().hex
+        (self.folder / job_id).mkdir()
+        job = {
+            "id": job_id,
+            "text": text,
+            "sections": sections,
+            "completed": 0,
+            "total": len(sections),
+            "status": "queued",
+            "message": "Waiting for the speech engine",
+            "duration": None,
+        }
+        with self.lock:
+            self.jobs[job_id] = job
+            self._prune()
+            return dict(job)
+
+    def _prune(self):
+        finished = [job for job in self.jobs.values() if job["status"] not in ACTIVE]
+        for job in finished[: max(0, len(finished) - self.KEEP)]:
+            del self.jobs[job["id"]]
+            shutil.rmtree(self.path(job["id"]), ignore_errors=True)
+
+    def path(self, job_id):
+        return self.folder / job_id
+
+    def get(self, job_id):
+        with self.lock:
+            return dict(self.jobs[job_id])
+
+    def update(self, job_id, **changes):
+        with self.lock:
+            self.jobs[job_id].update(changes)
+            return dict(self.jobs[job_id])
+
+    def active(self):
+        with self.lock:
+            return sum(job["status"] in ACTIVE for job in self.jobs.values())
+
+    def close(self):
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+
+# A section is re-rendered, with another seed, when it sounds garbled or fades out.
+ATTEMPTS = 3
+REQUIRED_COVERAGE = 0.9
+# Final words this many decibels quieter than the section's typical word: it faded out.
+FADE_DB = 12
+
+
 class Engine:
-    def __init__(self, store):
+    def __init__(self, store, recognizer=None, choice=None):
         self.store = store
+        self.recognizer = recognizer
+        self.choice = choice or choose()
+        self.renders = Renders()
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="voice-engine")
         self.lock = threading.RLock()
         self.model = None
-        self.prompts = {}
+        self.prompt = None
         self.cancellations = {}
         self.model_status = "idle"
 
-    def recover(self):
-        for job in self.store.list_jobs():
-            if job["status"] in ACTIVE:
-                self.store.update_job(
-                    job["id"],
-                    status="failed",
-                    message="Interrupted by a server restart. Generate again to retry.",
-                )
-
     def status(self):
         return {
-            "model": MODEL_ID,
-            "model_downloaded": model_downloaded(),
+            "model": self.choice.model.key,
+            "model_requested": self.choice.requested,
+            "model_downloaded": self.choice.model.downloaded(),
             "model_status": self.model_status,
-            "local": True,
         }
 
-    def submit(self, voice, text, language, seed):
+    def active(self):
+        return self.renders.active() > 0
+
+    def submit(self, voice, text):
         with self.lock:
-            if sum(j["status"] in ACTIVE for j in self.store.list_jobs()) >= 8:
+            if self.renders.active() >= 8:
                 raise ValueError("The queue is full. Wait for a render to finish.")
-            job = self.store.create_job(voice, text, language, seed, split_script(text))
+            job = self.renders.create(text, split_script(text))
             self.cancellations[job["id"]] = threading.Event()
             self.pool.submit(self._generate, job["id"], voice)
             return job
+
+    def job(self, job_id):
+        return self.renders.get(job_id)
+
+    def audio(self, job_id):
+        return self.renders.path(job_id) / "voiceover.wav"
 
     def cancel(self, job_id):
         with self.lock:
             event = self.cancellations.get(job_id)
             if event:
                 event.set()
-                job = self.store.job(job_id)
-                if job["status"] in ACTIVE:
-                    self.store.update_job(job_id, message="Stopping after the current section…")
-            return self.store.job(job_id)
+                if self.renders.get(job_id)["status"] in ACTIVE:
+                    self.renders.update(job_id, message="Stopping after the current section…")
+            return self.renders.get(job_id)
 
     def load(self):
         if self.model is None:
-            if not model_downloaded():
-                raise RuntimeError(
-                    "Download the model first with idiolect download, then try again."
-                )
+            model = self.choice.model
+            if not model.downloaded():
+                raise RuntimeError("The speech model is missing. Run idiolect setup first.")
             self.model_status = "loading"
-            import torch
-            from qwen_tts import Qwen3TTSModel
-
             device = accelerator()
             if device is None:
-                raise RuntimeError(
-                    "No GPU is available. On Linux, use bin/idiolect so the matching NVIDIA "
-                    "libraries are selected; on a Mac, use Apple silicon."
-                )
-            torch.set_num_threads(8)
-            self.model = Qwen3TTSModel.from_pretrained(
-                str(MODEL),
-                device_map=device,
-                dtype=torch.bfloat16,
-                attn_implementation="sdpa",
-                local_files_only=True,
-            )
+                raise RuntimeError("No supported GPU is available. Run idiolect doctor.")
+            log.info("Loading %s (%s)", model.name, self.choice.reason)
+            self.model = load_model(model, device)
             self.model_status = "ready"
         return self.model
+
+    def _voice_prompt(self, model, voice):
+        # Setup replaces the voice; its creation time identifies the recordings.
+        if self.prompt is None or self.prompt[0] != voice["created_at"]:
+            # A clip ending mid-sentence would make new text sound like the rest of it.
+            clip = next((c for c in voice["clips"] if ends_sentence(c["text"])), voice["clips"][0])
+            self.prompt = (
+                voice["created_at"],
+                model.prompt(self.store.path(clip["file"]), clip["text"]),
+            )
+        return self.prompt[1]
+
+    def _render_section(self, model, prompt, text, index, total, job_id, cancel):
+        """
+        Render one section and check it with the recognizer: keep the first attempt that says
+        every word through the end without fading out, cut where its final words end, or else
+        the best attempt.
+        """
+        best = None
+        for attempt in range(ATTEMPTS):
+            again = " again" if attempt else ""
+            self.renders.update(
+                job_id,
+                status="generating",
+                message=f"Rendering section {index + 1} of {total}{again}…",
+            )
+            wav, sr = model.generate(prompt, text, SEED + index + 1000 * attempt)
+            if self.recognizer is None:
+                return wav, sr
+            words = self.recognizer.transcribe(wav, sr)
+            end = speech_end(text, words)
+            # Every word heard, through the end, without fading out.
+            faded = ending_fade(wav, sr, words) > FADE_DB
+            score = coverage(text, words) + (1 if end is not None else 0) - (1 if faded else 0)
+            if end is not None:
+                # Cut the syllables the model sometimes adds after the text.
+                wav = cut_after(wav, sr, end)
+            if best is None or score > best[0]:
+                best = (score, wav, sr)
+            if end is not None and not faded and score - 1 >= REQUIRED_COVERAGE or cancel.is_set():
+                break
+            problem = "faded out" if faded else "sounded garbled"
+            log.info("Section %s %s (score %.2f); rendering again", index + 1, problem, score)
+        return best[1], best[2]
 
     def _generate(self, job_id, voice):
         started = time.monotonic()
         cancel = self.cancellations[job_id]
-        folder = self.store.render_path(job_id)
+        folder = self.renders.path(job_id)
         try:
             if cancel.is_set():
-                self.store.update_job(job_id, status="cancelled", message="Cancelled")
+                self.renders.update(job_id, status="cancelled", message="Cancelled")
                 return
-            self.store.update_job(job_id, status="loading", message="Loading the voice model…")
+            self.renders.update(job_id, status="loading", message="Loading the voice model…")
             model = self.load()
             import torch
 
-            job = self.store.job(job_id)
+            job = self.renders.get(job_id)
             with torch.inference_mode():
-                if voice["id"] not in self.prompts:
-                    self.prompts[voice["id"]] = model.create_voice_clone_prompt(
-                        ref_audio=str(self.store.voice_path(voice["id"]) / "reference.wav"),
-                        ref_text=voice["transcript"],
-                        x_vector_only_mode=False,
-                    )
-                    if len(self.prompts) > 16:
-                        self.prompts.pop(next(iter(self.prompts)))
-                prompt = self.prompts[voice["id"]]
-                for index, chunk in enumerate(job["chunks"]):
+                prompt = self._voice_prompt(model, voice)
+                for index, section in enumerate(job["sections"]):
                     if cancel.is_set():
                         break
-                    self.store.update_job(
-                        job_id,
-                        status="generating",
-                        message=f"Rendering section {index + 1} of {job['total']}…",
+                    wav, sr = self._render_section(
+                        model, prompt, section["text"], index, job["total"], job_id, cancel
                     )
-                    torch.manual_seed(job["seed"] + index)
-                    wavs, sr = model.generate_voice_clone(
-                        text=chunk,
-                        language=job["language"],
-                        voice_clone_prompt=prompt,
-                        max_new_tokens=2048,
-                    )
-                    sf.write(folder / f"section-{index:03d}.wav", wavs[0], sr, subtype="PCM_16")
-                    self.store.update_job(job_id, completed=index + 1)
+                    sf.write(folder / f"section-{index:03d}.wav", wav, sr, subtype="PCM_16")
+                    self.renders.update(job_id, completed=index + 1)
             if cancel.is_set():
-                self.store.update_job(
-                    job_id,
-                    status="cancelled",
-                    message="Cancelled. Finished sections are saved locally.",
-                )
+                self.renders.update(job_id, status="cancelled", message="Cancelled")
             else:
                 duration = join_audio(
-                    sorted(folder.glob("section-*.wav")), folder / "voiceover.wav"
+                    sorted(folder.glob("section-*.wav")),
+                    [section["pause"] for section in job["sections"]],
+                    folder / "voiceover.wav",
                 )
-                self.store.update_job(
-                    job_id,
-                    status="ready",
-                    message="Your voiceover is ready",
-                    duration=duration,
-                    elapsed=round(time.monotonic() - started, 1),
+                log.info("Rendered %ss in %.1fs", duration, time.monotonic() - started)
+                self.renders.update(
+                    job_id, status="ready", message="Your voiceover is ready", duration=duration
                 )
         except Exception as error:
             log.exception("Generation failed for %s", job_id)
@@ -170,7 +256,7 @@ class Engine:
             if "out of memory" in message.lower():
                 message = "The GPU ran out of memory. Close other GPU apps and try again."
                 empty_cache(accelerator())
-            self.store.update_job(job_id, status="failed", message=message[:700])
+            self.renders.update(job_id, status="failed", message=message[:700])
         finally:
             with self.lock:
                 self.cancellations.pop(job_id, None)
@@ -180,3 +266,4 @@ class Engine:
             for event in self.cancellations.values():
                 event.set()
         self.pool.shutdown(wait=True, cancel_futures=False)
+        self.renders.close()

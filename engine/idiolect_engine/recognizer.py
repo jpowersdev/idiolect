@@ -37,7 +37,7 @@ class Recognizer:
                 from faster_whisper import WhisperModel
 
                 if not recognizer_downloaded():
-                    raise ValueError("The reading model is missing. Run idiolect download first.")
+                    raise ValueError("The reading model is missing. Run idiolect setup first.")
                 self.model = WhisperModel(
                     str(ASR_MODEL),
                     device="cpu",

@@ -1,10 +1,11 @@
 [project]
 name = "idiolect-engine"
 version = "0.2.0"
-description = "Idiolect's local speech engine: Qwen3-TTS voice cloning and faster-whisper reading."
+description = "Idiolect's local speech engine: VoxCPM2 voice cloning and faster-whisper reading."
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "qwen-tts==0.1.1",
+  "voxcpm==2.0.3",
   # PyPI wheels use CUDA 12.8 on Linux and Metal (MPS) on Apple silicon.
   "torch==2.8.0",
   "torchaudio==2.8.0",
@@ -40,3 +41,22 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.uv]
+# VoxCPM's package also installs its training, denoising, and web UI dependencies.
+# Speech generation never imports them; leave them out.
+override-dependencies = [
+  "addict; sys_platform == 'never'",
+  "argbind; sys_platform == 'never'",
+  "datasets; sys_platform == 'never'",
+  "funasr; sys_platform == 'never'",
+  "gradio; sys_platform == 'never'",
+  "inflect; sys_platform == 'never'",
+  "matplotlib; sys_platform == 'never'",
+  "modelscope; sys_platform == 'never'",
+  "simplejson; sys_platform == 'never'",
+  "sortedcontainers; sys_platform == 'never'",
+  "spaces; sys_platform == 'never'",
+  "torchcodec; sys_platform == 'never'",
+  "wetext; sys_platform == 'never'",
+]
