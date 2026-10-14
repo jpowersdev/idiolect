@@ -3,65 +3,32 @@ import { Effect, Exit, Fiber, Layer } from "effect"
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { IdiolectError } from "../src/Errors.ts"
-import {
-  checkOutput,
-  chooseVoice,
-  defaultVoice,
-  inputText,
-  playRender,
-  publish,
-  renderVoice,
-  setDefaultVoice
-} from "../src/Library.ts"
-import { fakeAudio, fakeEngine, render, temporaryDirectory, voice } from "./support.ts"
+import { checkOutput, inputText, playRender, publish, renderVoice } from "../src/Library.ts"
+import { fakeAudio, fakeEngine, render, temporaryDirectory } from "./support.ts"
 
 const text = (options: Partial<Parameters<typeof inputText>[0]>) =>
-  inputText({
-    words: [],
-    file: undefined,
-    stdinIsTTY: true,
-    readStdin: () => "",
-    readFile: () => "",
-    ...options
-  })
+  inputText({ words: [], stdinIsTTY: true, readStdin: () => "", ...options })
 
-test("scripts come from words, a file, or a pipe", () => {
+test("scripts come from words or a pipe", () => {
   expect(text({ words: ["Hello", "there"] })).toBe("Hello there")
-  expect(text({ file: "script.txt", readFile: () => "A script from a file.\n" })).toBe("A script from a file.")
-  expect(text({ stdinIsTTY: false, readStdin: () => "A piped script." })).toBe("A piped script.")
-  expect(() => text({ words: ["Hello"], file: "script.txt" })).toThrow("rather than both")
+  expect(text({ stdinIsTTY: false, readStdin: () => "A piped script.\n" })).toBe("A piped script.")
   expect(() => text({ words: ["x".repeat(12001)] })).toThrow("12,000")
   expect(() => text({})).toThrow("Give me words")
 })
 
-test("voices resolve by default, ID prefix, or unambiguous name", () => {
-  const data = temporaryDirectory()
-  const voices = [voice("abcd1111"), voice("efgh2222")]
-  expect(() => chooseVoice(voices, undefined, defaultVoice(data))).toThrow("Set up")
-  setDefaultVoice(data, voices[1]!)
-  expect(chooseVoice(voices, undefined, defaultVoice(data))).toEqual(voices[1]!)
-  expect(chooseVoice(voices, "abcd", undefined)).toEqual(voices[0]!)
-  expect(() => chooseVoice(voices, "Me", undefined)).toThrow("ambiguous")
-})
-
 describe("saving audio", () => {
-  test("existing output is protected before any work starts", () => {
+  test("the output path is checked before any work starts", () => {
     const folder = temporaryDirectory()
-    const target = join(folder, "existing.wav")
-    writeFileSync(target, "original audio")
-    expect(() => checkOutput(target, false)).toThrow("already exists")
-    expect(() => checkOutput(join(folder, "speech.mp3"), false)).toThrow(".wav")
-    expect(() => checkOutput(join(folder, "missing", "speech.wav"), false)).toThrow("does not exist")
-    expect(readFileSync(target, "utf8")).toBe("original audio")
+    expect(() => checkOutput(join(folder, "speech.mp3"))).toThrow(".wav")
+    expect(() => checkOutput(join(folder, "missing", "speech.wav"))).toThrow("does not exist")
+    expect(() => checkOutput(join(folder, "speech.wav"))).not.toThrow()
   })
 
-  test("publishing is atomic and only overwrites when forced", () => {
+  test("publishing replaces the file atomically", () => {
     const folder = temporaryDirectory()
     const output = join(folder, "speech.wav")
     writeFileSync(output, "old audio")
-    expect(() => publish(new TextEncoder().encode("new audio"), output, false)).toThrow("already exists")
-    expect(readFileSync(output, "utf8")).toBe("old audio")
-    publish(new TextEncoder().encode("new audio"), output, true)
+    publish(new TextEncoder().encode("new audio"), output)
     expect(readFileSync(output, "utf8")).toBe("new audio")
     expect(readdirSync(folder)).toEqual(["speech.wav"])
   })
@@ -80,7 +47,7 @@ test("interrupting a render cancels that render", async () => {
   })
   const exit = await Effect.runPromise(
     Effect.gen(function*() {
-      const fiber = yield* Effect.forkChild(renderVoice(voice("voice123"), "Hello"))
+      const fiber = yield* Effect.forkChild(renderVoice("Hello"))
       yield* Effect.sleep("700 millis")
       return yield* Fiber.interrupt(fiber).pipe(Effect.andThen(Fiber.await(fiber)))
     }).pipe(Effect.provide(engine))
@@ -93,7 +60,7 @@ test("a failed render reports the engine's message", async () => {
   const engine = fakeEngine({
     generate: () => Effect.succeed(render({ status: "failed", message: "The GPU ran out of memory." }))
   })
-  const error = await Effect.runPromise(renderVoice(voice("voice123"), "Hello").pipe(Effect.flip, Effect.provide(engine)))
+  const error = await Effect.runPromise(renderVoice("Hello").pipe(Effect.flip, Effect.provide(engine)))
   expect(error.message).toBe("The GPU ran out of memory.")
 })
 

@@ -1,18 +1,14 @@
-/** Record a reading, following along through the engine's recognizer, until it is complete. */
+/** Record a reading until the engine's recognizer hears the end of the script. */
 import { Duration, Effect, Fiber, Stream } from "effect"
-import type { Word } from "./Api.ts"
 import { Audio } from "./Audio.ts"
 import { Engine } from "./Engine.ts"
 import { fail } from "./Errors.ts"
-import {
-  matchReading,
-  MaxRecordingSeconds,
-  pcmSamples,
-  type ReadingMatch,
-  SampleRate,
-  type SavedReading,
-  saveReading
-} from "./Reading.ts"
+import { findEnding, MaxRecordingSeconds, pcmSamples, SampleRate, type SavedReading, saveReading } from "./Reading.ts"
+
+/** Recent speech to check for the end of the script: comfortably more than its final words. */
+const ListeningSeconds = 8
+/** Silence after the final words that ends the recording. */
+const PauseSeconds = 0.6
 
 const silentMicrophone = () =>
   fail(
@@ -20,6 +16,22 @@ const silentMicrophone = () =>
       ? " On macOS, allow your terminal app in System Settings > Privacy & Security > Microphone, then restart it."
       : " Check that the right input device is selected and unmuted.")
   )
+
+/** The last `size` bytes (whole samples) of the first `length` recorded bytes. */
+const tail = (chunks: ReadonlyArray<Uint8Array>, length: number, size: number) => {
+  const start = length - (Math.min(length, size) & ~1)
+  const bytes = new Uint8Array(length - start)
+  let chunkEnd = chunks.reduce((total, chunk) => total + chunk.length, 0)
+  for (let index = chunks.length - 1; index >= 0 && chunkEnd > start; index--) {
+    const chunk = chunks[index]!
+    const chunkStart = chunkEnd - chunk.length
+    const from = Math.max(chunkStart, start)
+    const to = Math.min(chunkEnd, length)
+    if (to > from) bytes.set(chunk.subarray(from - chunkStart, to - chunkStart), from - start)
+    chunkEnd = chunkStart
+  }
+  return bytes
+}
 
 const concat = (chunks: ReadonlyArray<Uint8Array>, length: number) => {
   const bytes = new Uint8Array(length)
@@ -34,7 +46,9 @@ const concat = (chunks: ReadonlyArray<Uint8Array>, length: number) => {
 export const recordReading = Effect.fn("recordReading")(function*(options: {
   readonly script: string
   readonly device: string | undefined
-  readonly progress: (match: ReadingMatch) => Effect.Effect<void>
+  readonly progress: (heard: { readonly seconds: number; readonly heard: string }) => Effect.Effect<void>
+  /** Runs as soon as the end is heard, before the whole take is transcribed. */
+  readonly heardEnd: Effect.Effect<void>
 }) {
   const audio = yield* Audio
   const engine = yield* Engine
@@ -60,10 +74,13 @@ export const recordReading = Effect.fn("recordReading")(function*(options: {
     )
   })
 
-  const follow = Effect.gen(function*() {
+  const transcribe = (pcm: Uint8Array) =>
+    engine.call(engine.api.transcribe({ query: { sample_rate: SampleRate }, payload: pcm }))
+      .pipe(Effect.map(({ words }) => words))
+
+  // Listen to the last few seconds for the script's final words, then a pause.
+  const listen = Effect.gen(function*() {
     const started = Date.now()
-    let completePasses = 0
-    let last = matchReading(options.script, [])
     while (Date.now() - started < MaxRecordingSeconds * 1000) {
       // A blocked microphone delivers exact zeros rather than an error.
       if (!heardSignal && length >= SampleRate * 2 * 5) return yield* silentMicrophone()
@@ -72,32 +89,26 @@ export const recordReading = Effect.fn("recordReading")(function*(options: {
         continue
       }
       const submitted = Date.now()
-      const snapshot = concat(chunks, length & ~1)
-      const snapshotSeconds = snapshot.length / 2 / SampleRate
-      const { words } = yield* engine.call(
-        engine.api.transcribe({ query: { sample_rate: SampleRate }, payload: snapshot })
-      )
-      last = matchReading(options.script, words)
-      yield* options.progress(last)
-      completePasses = last.complete ? completePasses + 1 : 0
-      // Two agreeing passes, and a short pause after the final word, end the reading.
-      if (completePasses >= 2 && snapshotSeconds - words[last.lastWord!]!.end >= 0.45) {
-        return { pcm: pcmSamples(concat(chunks, length & ~1)), words, match: last }
-      }
-      yield* Effect.sleep(Duration.millis(Math.max(0, 1500 - (Date.now() - submitted))))
+      const window = tail(chunks, length & ~1, ListeningSeconds * SampleRate * 2)
+      const words = yield* transcribe(window)
+      yield* options.progress({ seconds: (Date.now() - started) / 1000, heard: words.map((word) => word.text.trim()).join(" ") })
+      const ending = findEnding(options.script, words)
+      if (ending.done && window.length / 2 / SampleRate - words[ending.lastWord!]!.end >= PauseSeconds) return
+      yield* Effect.sleep(Duration.millis(Math.max(0, 500 - (Date.now() - submitted))))
     }
     return yield* fail(
-      `Recognized ${last.matched}/${last.total} words before the time limit. ` +
-        "Check your microphone and read the whole script again."
+      "I did not hear the end of the script before the time limit. Check your microphone and read it again."
     )
   })
 
-  const result: { pcm: Int16Array; words: ReadonlyArray<Word>; match: ReadingMatch } = yield* Effect.raceFirst(
-    follow,
-    recorderStopped
-  )
+  yield* Effect.raceFirst(listen, recorderStopped)
+  yield* options.heardEnd
+  // Then transcribe the whole take once, for its exact words and timings.
+  const pcm = concat(chunks, length & ~1)
+  const words = yield* transcribe(pcm)
+  const ending = findEnding(options.script, words)
   return yield* Effect.try({
-    try: (): SavedReading => saveReading(result.pcm, result.words, result.match),
+    try: (): SavedReading => saveReading(pcmSamples(pcm), words, ending.lastWord ?? words.length - 1),
     catch: (error) => fail(error instanceof Error ? error.message : String(error))
   })
 }, Effect.scoped)

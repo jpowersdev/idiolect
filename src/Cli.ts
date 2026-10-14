@@ -1,51 +1,26 @@
-/** Guided voice enrollment and local text-to-speech commands. */
+/** Record your voice, then speak text in it. */
 import { Console, Effect, Option } from "effect"
 import { Argument, Command, Flag } from "effect/cli"
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { createInterface } from "node:readline"
 import { resolve } from "node:path"
-import { Languages, type Voice } from "./Api.ts"
 import { Audio } from "./Audio.ts"
-import { DefaultPort, Engine } from "./Engine.ts"
+import { Engine } from "./Engine.ts"
 import { recordReading } from "./Enroll.ts"
 import { fail, IdiolectError } from "./Errors.ts"
-import {
-  attempt,
-  checkOutput,
-  chooseVoice,
-  defaultVoice,
-  inputText,
-  playRender,
-  publish,
-  renderAudio,
-  renderVoice,
-  setDefaultVoice
-} from "./Library.ts"
+import { install, locate, notInstalled, Version } from "./Install.ts"
+import { attempt, checkOutput, inputText, playRender, publish, renderAudio, renderVoice } from "./Library.ts"
 import { Paths } from "./Paths.ts"
-import { ReadingScript, type ReadingMatch } from "./Reading.ts"
+import type { SavedReading } from "./Reading.ts"
+import { type Script, Scripts } from "./Scripts.ts"
 
 export const PreviewText = "Here is something I never read aloud. Does this sound like me? " +
   "A familiar voice can tell a completely new story."
 
-const root = Command.make("idiolect").pipe(
-  Command.withSharedFlags({
-    port: Flag.Int("port").pipe(
-      Flag.withDescription(`Local engine port (default: ${DefaultPort})`),
-      Flag.withDefault(DefaultPort)
-    )
-  }),
-  Command.withDescription("Your words. Your voice.")
-)
-
-const onPort = <A, E, R>(port: number, body: Effect.Effect<A, E, R>) =>
-  Effect.gen(function*() {
-    if (port < 1 || port > 65535) return yield* fail("Choose a port between 1 and 65535.")
-    return yield* Effect.provide(body, Engine.layer(port))
-  })
-
-/** Run a subcommand body with the engine on the chosen --port. */
-const withEngine = <A, E, R>(body: Effect.Effect<A, E, R>) =>
-  Effect.flatMap(root, ({ port }) => onPort(port, body))
+/** Exit codes from foreground engine commands become this process's exit code. */
+const exitWith = (code: number) => Effect.sync(() => {
+  if (code !== 0) process.exitCode = code
+})
 
 const wrap = (text: string, width = 72) =>
   text.split(" ").reduce<Array<string>>((lines, word) => {
@@ -57,6 +32,46 @@ const wrap = (text: string, width = 72) =>
     }
     return lines
   }, []).join("\n")
+
+/**
+ * Wait for a single key while recording. The terminal is in raw mode meanwhile, so Ctrl+C
+ * arrives as a key too: pass it on as the usual interrupt.
+ */
+const keypress = (key: string) =>
+  Effect.callback<void>((resume) => {
+    const input = process.stdin
+    const listener = (data: Buffer) => {
+      const text = data.toString()
+      if (text.includes("\x03")) process.kill(process.pid, "SIGINT")
+      else if (text.toLowerCase().includes(key)) resume(Effect.void)
+    }
+    input.setRawMode(true)
+    input.resume()
+    input.on("data", listener)
+    return Effect.sync(() => {
+      input.off("data", listener)
+      input.setRawMode(false)
+      input.pause()
+    })
+  })
+
+/** A yes-or-no question; Enter takes the default. */
+const confirm = (question: string, preferred = true) =>
+  Effect.map(ask(`${question} ${preferred ? "[Y/n]" : "[y/N]"} `), (answer) => {
+    const reply = answer.trim().toLowerCase()
+    return reply === "" ? preferred : reply === "y" || reply === "yes"
+  })
+
+const bold = (text: string) => `\x1b[1m${text}\x1b[22m`
+const dim = (text: string) => `\x1b[2m${text}\x1b[22m`
+
+/** One script on a fresh screen, wrapped to read comfortably in any terminal. */
+const page = (script: Script, index: number) => {
+  const width = Math.min(72, (process.stdout.columns || 80) - 2)
+  const notice = script.notice ? `\n\n${dim(wrap(script.notice, width))}` : ""
+  return `\x1b[2J\x1b[H${bold(`${index + 1} of ${Scripts.length} · ${script.title}`)}\n\n` +
+    `${wrap(script.text, width)}${notice}\n`
+}
 
 /**
  * Read one line in the terminal's normal (cooked) mode, so Ctrl+C stays an
@@ -79,55 +94,99 @@ const ask = (prompt: string) =>
     })
   })
 
-const enroll = Effect.fn("enroll")(function*(options: { readonly name: string; readonly device: Option.Option<string> }) {
-  const name = options.name.trim()
-  if (name.length < 1 || name.length > 60) return yield* fail("Use a voice name between 1 and 60 characters.")
+const enroll = Effect.fn("enroll")(function*(options: { readonly device: Option.Option<string> }) {
   if (!process.stdin.isTTY) return yield* fail("Run idiolect setup in an interactive terminal to record your microphone.")
   const engine = yield* Engine
-  const paths = yield* Paths
   const audio = yield* Audio
+  const paths = yield* Paths
   yield* audio.check
+
+  // Install only what is missing, and only once you agree.
+  const location = locate(paths)
+  if (location._tag === "Missing") return yield* notInstalled
+  if (location._tag === "Managed" && !location.current) {
+    const updating = existsSync(location.command)
+    const agreed = yield* confirm(
+      updating
+        ? `\nThe speech engine needs updating for Idiolect ${Version}. Update it now?`
+        : `\nIdiolect needs to install its speech engine (Python and PyTorch, about 1 GB) in ${paths.data}. Install it now?`
+    )
+    if (!agreed) return yield* Console.log("Nothing installed. Run idiolect setup when you are ready.")
+    yield* install(paths, updating)
+  }
   const status = yield* engine.ensure
   if (!status.recognizer_downloaded || !status.model_downloaded) {
-    return yield* fail("Download the speech and reading models first with idiolect download.")
+    const agreed = yield* confirm(
+      `\nIdiolect needs to download its speech and reading models (about 5 GB) to ${paths.data}. Download them now?`
+    )
+    if (!agreed) return yield* Console.log("Nothing downloaded. Run idiolect setup when you are ready.")
+    const code = yield* engine.foreground(["download"])
+    if (code !== 0) return yield* fail("The models could not be downloaded. Run idiolect setup to try again.")
+  }
+  const previous = yield* engine.call(engine.api.voice()).pipe(Effect.option)
+  if (Option.isSome(previous) && !(yield* confirm("\nYou already have a voice. Record a new one?", false))) {
+    return yield* Console.log("Everything is ready. Try: idiolect say \"This is my voice, reading something new.\"")
   }
   const device = Option.getOrUndefined(options.device)
-  yield* Console.log(`\nRead this aloud in your natural voice:\n\n${wrap(ReadingScript)}\n`)
-  yield* Console.log("Allow about 20–25 seconds at your usual pace, with natural pauses.")
-  yield* Console.log("Use your everyday accent and speaking voice.")
-  yield* Console.log("Follow the whole script. I will stop after recognizing the final words.")
+  yield* Console.log(`\nYou will read ${Scripts.length} short scripts aloud, about four minutes in all.`)
+  yield* Console.log("Use your everyday accent and speaking voice, at your usual pace, with natural pauses.")
+  yield* Console.log("Let each script carry you: tell the story, explain the steps, chat with a friend.")
+  yield* Console.log("Each recording stops by itself shortly after you read the script's final words.")
   yield* Console.log(device ? `Microphone: ${device}` : "Using your default microphone. Use --device to choose another.")
+  if (Option.isSome(previous)) yield* Console.log("Your current voice stays until you finish every script.")
 
-  const progress = (match: ReadingMatch) =>
+  const progress = ({ heard, seconds }: { readonly heard: string; readonly seconds: number }) =>
     Effect.sync(() => {
-      const next = match.nextWords ? `  Next: "${match.nextWords}"` : "  Finishing…"
-      process.stdout.write(`\r\x1b[KFollowing ${match.matched}/${match.total} words.${next}`)
+      // One line, rewritten in place; a wrapped line would leave copies behind.
+      const width = (process.stdout.columns || 80) - 1
+      const prefix = `${Math.floor(seconds)}s  `
+      const recent = heard.length > width - prefix.length ? `…${heard.slice(-(width - prefix.length - 1))}` : heard
+      process.stdout.write(`\r\x1b[K${prefix}${recent}`)
     })
 
-  let reading: Option.Option<{ wav: Uint8Array; transcript: string; duration: number }> = Option.none()
-  while (Option.isNone(reading)) {
-    yield* ask("\nPress Enter when you are ready to start. ")
-    yield* Console.log("Reading along… (Ctrl+C to cancel)")
-    const attemptReading = yield* recordReading({ script: ReadingScript, device, progress }).pipe(Effect.result)
-    if (attemptReading._tag === "Success") {
-      reading = Option.some(attemptReading.success)
-    } else {
-      yield* Console.log(`\n${attemptReading.failure.message}`)
-      const answer = yield* ask("Press Enter to try again, or type q to quit: ")
-      if (answer.trim().toLowerCase() === "q") return
+  const heardEnd = Console.log("\nGot it.")
+
+  const takes: Array<{ readonly script: Script; readonly reading: SavedReading }> = []
+  yield* ask("\nPress Enter to see the first script. ")
+  for (const [index, script] of Scripts.entries()) {
+    let reading: Option.Option<SavedReading> = Option.none()
+    let restarting = false
+    while (Option.isNone(reading)) {
+      yield* Console.log(page(script, index))
+      // Restarting goes straight back to listening; otherwise wait until the reader is ready.
+      if (!restarting) yield* ask("Press Enter when you are ready to start. ")
+      yield* Console.log("Listening… (r to restart this script, Ctrl+C to cancel)")
+      const attempt = yield* Effect.raceFirst(
+        recordReading({ script: script.text, device, progress, heardEnd }).pipe(Effect.result),
+        keypress("r").pipe(Effect.as("restart" as const))
+      )
+      restarting = attempt === "restart"
+      if (attempt === "restart") continue
+      if (attempt._tag === "Success") {
+        reading = Option.some(attempt.success)
+      } else {
+        yield* Console.log(`\n${attempt.failure.message}`)
+        const answer = yield* ask("Press Enter to try again, or type q to quit: ")
+        if (answer.trim().toLowerCase() === "q") return
+      }
     }
+    yield* Console.log(`${reading.value.duration}s.`)
+    takes.push({ script, reading: reading.value })
   }
-  const { duration, transcript, wav } = reading.value
-  yield* Console.log(`\nGot it. Complete script, ${duration}s.`)
+
   const form = new FormData()
-  form.append("name", name)
-  form.append("transcript", transcript)
-  form.append("audio", new Blob([wav as Uint8Array<ArrayBuffer>], { type: "audio/wav" }), "reference.wav")
-  const voice: Voice = yield* engine.call(engine.api.addVoice({ payload: form }))
-  yield* attempt(() => setDefaultVoice(paths.data, voice))
-  yield* Console.log(`\nSaved "${voice.name}" as your default voice.`)
-  yield* Console.log("Now listen to a few new sentences in your cloned voice.")
-  yield* renderVoice(voice, PreviewText).pipe(
+  form.append("takes", JSON.stringify(takes.map(({ reading, script }) => ({
+    script: script.id,
+    transcript: reading.transcript,
+    words: reading.words,
+    ...(script.notice ? { notice: script.notice } : {})
+  }))))
+  for (const { reading, script } of takes) {
+    form.append("audio", new Blob([reading.wav as Uint8Array<ArrayBuffer>], { type: "audio/wav" }), `${script.id}.wav`)
+  }
+  yield* engine.call(engine.api.replaceVoice({ payload: form }))
+  yield* Console.log("\nSaved your voice. Now listen to a few new sentences in it.")
+  yield* renderVoice(PreviewText).pipe(
     Effect.flatMap(playRender),
     Effect.catch((error: IdiolectError) =>
       Console.error(`Your voice is saved, but the preview could not finish: ${error.message}`)
@@ -136,122 +195,75 @@ const enroll = Effect.fn("enroll")(function*(options: { readonly name: string; r
   yield* Console.log("Try: idiolect say \"This is my voice, reading something new.\"")
 })
 
-const setupFlags = {
-  name: Flag.String("name").pipe(Flag.withDescription("Name for this voice (default: Me)"), Flag.withDefault("Me")),
+const setup = Command.make("setup", {
   device: Flag.String("device").pipe(
     Flag.withDescription("Microphone for SoX (sets AUDIODEV): a CoreAudio device name on macOS, a PulseAudio source or ALSA device on Linux"),
     Flag.optional
   )
-}
-
-const setup = Command.make("setup", setupFlags, (options) => withEngine(enroll(options))).pipe(
-  Command.withDescription("Read a script, save your voice, and hear a preview")
+}, (options) => enroll(options)).pipe(
+  Command.withDescription("Record your voice by reading a few short scripts aloud")
 )
 
 const say = Command.make("say", {
-  text: Argument.String("text").pipe(Argument.variadic()),
-  file: Flag.String("file").pipe(Flag.withAlias("f"), Flag.withDescription("Read a script from a text file, or - for stdin"), Flag.optional),
-  output: Flag.String("output").pipe(Flag.withAlias("o"), Flag.withDescription("Save a WAV instead of playing it aloud"), Flag.optional),
-  voice: Flag.String("voice").pipe(Flag.withDescription("Saved voice name or ID (otherwise your default)"), Flag.optional),
-  language: Flag.Literals("language", Languages).pipe(Flag.withDefault("English")),
-  seed: Flag.Int("seed").pipe(Flag.withDefault(12)),
-  force: Flag.Boolean("force").pipe(Flag.withDescription("Replace an existing output file"), Flag.withDefault(false))
+  text: Argument.String("text").pipe(Argument.withDescription("Words to speak, or pipe them in"), Argument.variadic()),
+  output: Flag.String("output").pipe(Flag.withAlias("o"), Flag.withDescription("Save a WAV instead of playing it aloud"), Flag.optional)
 }, (options) =>
-  withEngine(Effect.gen(function*() {
-    if (options.seed < 0 || options.seed > 2 ** 31 - 1) return yield* fail("Choose a seed between 0 and 2147483647.")
+  Effect.gen(function*() {
     const text = yield* attempt(() =>
       inputText({
         words: options.text,
-        file: Option.getOrUndefined(options.file),
         stdinIsTTY: process.stdin.isTTY === true,
-        readStdin: () => readFileSync(0, "utf8"),
-        readFile: (path) => readFileSync(path, "utf8")
+        readStdin: () => readFileSync(0, "utf8")
       })
     )
     const output = Option.map(options.output, (path) => resolve(path))
     // Check the output or the player before starting the engine or rendering.
     if (Option.isSome(output)) {
-      yield* attempt(() => checkOutput(output.value, options.force))
+      yield* attempt(() => checkOutput(output.value))
     } else {
       yield* (yield* Audio).check
     }
-    const engine = yield* Engine
-    const paths = yield* Paths
-    yield* engine.ensure
-    const voices = yield* engine.call(engine.api.voices())
-    const voice = yield* attempt(() => chooseVoice(voices, Option.getOrUndefined(options.voice), defaultVoice(paths.data)))
-    const job = yield* renderVoice(voice, text, options.language, options.seed)
+    yield* (yield* Engine).ensure
+    const job = yield* renderVoice(text)
     if (Option.isSome(output)) {
       const bytes = yield* renderAudio(job)
-      yield* attempt(() => publish(bytes, output.value, options.force))
+      yield* attempt(() => publish(bytes, output.value))
       yield* Console.error(`Saved ${job.duration ?? 0}s of audio.`)
       yield* Console.log(output.value)
     } else {
       yield* playRender(job)
     }
-  }))).pipe(Command.withDescription("Speak text aloud, or save a WAV with --output"))
-
-const voices = Command.make("voices", {
-  use: Flag.String("use").pipe(Flag.withDescription("Make a voice name or ID the default"), Flag.optional)
-}, (options) =>
-  withEngine(Effect.gen(function*() {
-    const engine = yield* Engine
-    const paths = yield* Paths
-    yield* engine.ensure
-    const list = yield* engine.call(engine.api.voices())
-    if (Option.isSome(options.use)) {
-      const chosen = yield* attempt(() => chooseVoice(list, options.use.pipe(Option.getOrUndefined), undefined))
-      yield* attempt(() => setDefaultVoice(paths.data, chosen))
-    }
-    const selected = yield* attempt(() => defaultVoice(paths.data))
-    for (const voice of list) {
-      yield* Console.log(`${voice.id === selected ? "*" : " "} ${voice.id.slice(0, 8)}  ${voice.name}  (${voice.duration}s)`)
-    }
-    if (list.length === 0) yield* Console.log("No voices yet. Run idiolect setup.")
-  }))).pipe(Command.withDescription("List saved voices"))
-
-const status = Command.make("status", {}, () =>
-  withEngine(Effect.gen(function*() {
-    const engine = yield* Engine
-    const paths = yield* Paths
-    const running = yield* engine.probe
-    yield* Console.log(Option.match(running, {
-      onNone: () => "Engine stopped",
-      onSome: (status) => `Engine ${status.model_status} · ${paths.data}`
-    }))
-  }))).pipe(Command.withDescription("Show the local engine status"))
-
-const stop = Command.make("stop", {}, () =>
-  withEngine(Effect.gen(function*() {
-    const engine = yield* Engine
-    yield* Console.log((yield* engine.stop) ? "Engine stopped." : "Engine already stopped.")
-  }))).pipe(Command.withDescription("Stop the idle engine and release its GPU memory"))
-
-/** Exit codes from foreground engine commands become this process's exit code. */
-const exitWith = (code: number) => Effect.sync(() => {
-  if (code !== 0) process.exitCode = code
-})
-
-const serve = Command.make("serve", {}, () =>
-  withEngine(Effect.gen(function*() {
-    const engine = yield* Engine
-    yield* exitWith(yield* engine.foreground(["serve", "--port", String(engine.port)]))
-  }))).pipe(Command.withDescription("Run the local speech engine in the foreground"))
-
-const download = Command.make("download", {}, () =>
-  withEngine(Effect.gen(function*() {
-    const engine = yield* Engine
-    yield* exitWith(yield* engine.foreground(["download"]))
-  }))).pipe(Command.withDescription("Download speech and reading models for offline use"))
+  })).pipe(Command.withDescription("Speak text in your voice, or save it with --output"))
 
 const doctor = Command.make("doctor", {}, () =>
-  withEngine(Effect.gen(function*() {
-    const engine = yield* Engine
-    yield* exitWith(yield* engine.foreground(["doctor"]))
-  }))).pipe(Command.withDescription("Check the GPU and speech models"))
+  Effect.gen(function*() {
+    const sox = yield* (yield* Audio).check.pipe(Effect.result)
+    yield* Console.log(sox._tag === "Success" ? "SoX: ready" : `SoX: ${sox.failure.message}`)
+    // Report the engine without installing it; setup does that.
+    const location = locate(yield* Paths)
+    if (location._tag === "Missing") {
+      yield* Console.log(`Engine: ${notInstalled.message}`)
+      return yield* exitWith(1)
+    }
+    if (location._tag === "OnPath") {
+      yield* Console.log(`Engine: ${location.command}`)
+    } else {
+      yield* Console.log(Bun.which("uv") === null ? "uv: missing (brew install uv)" : "uv: ready")
+      if (!location.current) {
+        yield* Console.log(
+          existsSync(location.command)
+            ? `Engine: needs updating for ${Version} (idiolect setup updates it)`
+            : "Engine: not installed yet (idiolect setup installs it)"
+        )
+        return yield* exitWith(1)
+      }
+      yield* Console.log(`Engine: ${Version}`)
+    }
+    const code = yield* (yield* Engine).foreground(["doctor"])
+    yield* exitWith(sox._tag === "Success" ? code : 1)
+  })).pipe(Command.withDescription("Check the GPU, models, engine, and audio tools"))
 
-export const idiolect = root.pipe(
-  // With no subcommand, start guided setup.
-  Command.withHandler(({ port }) => onPort(port, enroll({ name: "Me", device: Option.none() }))),
-  Command.withSubcommands([setup, say, voices, status, stop, serve, download, doctor])
+export const idiolect = Command.make("idiolect").pipe(
+  Command.withDescription("Local voice cloning from the terminal"),
+  Command.withSubcommands([setup, say, doctor])
 )

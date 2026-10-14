@@ -1,27 +1,41 @@
 """Stand-ins for the speech models, so the HTTP API runs without a GPU."""
 
 from idiolect_engine.audio import split_script
-from idiolect_engine.config import MODEL_ID
+from idiolect_engine.engine import Renders
 
 
 class IdleEngine:
-    def __init__(self, store):
+    """Accepts renders but never runs them."""
+
+    def __init__(self, store, recognizer=None):
         self.store = store
+        self.renders = Renders()
 
     def status(self):
-        return {"model": MODEL_ID, "model_downloaded": True, "model_status": "idle", "local": True}
+        return {
+            "model": "voxcpm2",
+            "model_requested": False,
+            "model_downloaded": True,
+            "model_status": "idle",
+        }
 
-    def recover(self):
-        pass
+    def active(self):
+        return self.renders.active() > 0
 
-    def submit(self, voice, text, language, seed):
-        return self.store.create_job(voice, text, language, seed, split_script(text))
+    def submit(self, voice, text):
+        return self.renders.create(text, split_script(text))
+
+    def job(self, job_id):
+        return self.renders.get(job_id)
+
+    def audio(self, job_id):
+        return self.renders.path(job_id) / "voiceover.wav"
 
     def cancel(self, job_id):
-        return self.store.update_job(job_id, status="cancelled")
+        return self.renders.update(job_id, status="cancelled")
 
     def shutdown(self):
-        pass
+        self.renders.close()
 
 
 class FakeRecognizer:

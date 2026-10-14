@@ -2,48 +2,35 @@
  * The HTTP contract between the CLI and a local speech engine.
  *
  * The Python engine in engine/ implements it today. Any engine that serves
- * these endpoints on 127.0.0.1, and reports `api: ApiVersion`, can replace it.
+ * these endpoints on the data directory's engine.sock, and reports
+ * `api: ApiVersion`, can replace it.
  */
 import { Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiSchema } from "effect/http-api"
 
 export const ApiVersion = 1
 
-export const Languages = [
-  "English",
-  "Chinese",
-  "Japanese",
-  "Korean",
-  "German",
-  "French",
-  "Russian",
-  "Portuguese",
-  "Spanish",
-  "Italian"
-] as const
-
-export const Language = Schema.Literals(Languages)
-export type Language = typeof Language.Type
-
 export const Status = Schema.Struct({
   service: Schema.Literal("idiolect"),
   api: Schema.Int,
+  /** The engine's release, which must match the CLI's. */
+  version: Schema.String,
   pid: Schema.Int,
-  data_directory: Schema.String,
+  /** Which speech model the engine uses: chosen for the hardware, or set by IDIOLECT_MODEL. */
   model: Schema.String,
+  /** True when IDIOLECT_MODEL chose the model, rather than the engine choosing for the hardware. */
+  model_requested: Schema.Boolean,
   model_downloaded: Schema.Boolean,
   recognizer_downloaded: Schema.Boolean,
-  model_status: Schema.String,
-  languages: Schema.Array(Schema.String)
+  model_status: Schema.String
 })
 export type Status = typeof Status.Type
 
+/** Your voice: one recorded take per setup script. */
 export const Voice = Schema.Struct({
-  id: Schema.String,
-  name: Schema.String,
-  transcript: Schema.String,
+  created_at: Schema.String,
   duration: Schema.Number,
-  created_at: Schema.String
+  takes: Schema.Array(Schema.Struct({ script: Schema.String, duration: Schema.Number }))
 })
 export type Voice = typeof Voice.Type
 
@@ -60,17 +47,11 @@ export const activeStatuses: ReadonlySet<RenderStatus> = new Set(["queued", "loa
 
 export const Render = Schema.Struct({
   id: Schema.String,
-  voice_id: Schema.String,
-  voice_name: Schema.String,
-  text: Schema.String,
-  language: Schema.String,
-  seed: Schema.Int,
   completed: Schema.Int,
   total: Schema.Int,
   status: RenderStatus,
   message: Schema.String,
-  duration: Schema.NullOr(Schema.Number),
-  elapsed: Schema.NullOr(Schema.Number)
+  duration: Schema.NullOr(Schema.Number)
 })
 export type Render = typeof Render.Type
 
@@ -116,28 +97,23 @@ export class EngineGroup extends HttpApiGroup.make("engine")
       error: [Conflict, TooLarge, Invalid]
     })
   )
-  .add(HttpApiEndpoint.get("voices", "/api/voices", { success: Schema.Array(Voice) }))
+  .add(HttpApiEndpoint.get("voice", "/api/voice", { success: Voice, error: NotFound }))
   .add(
-    HttpApiEndpoint.post("addVoice", "/api/voices", {
-      // Fields: name, transcript, and audio (a WAV file).
+    HttpApiEndpoint.put("replaceVoice", "/api/voice", {
+      // Fields: takes, a JSON array of { script, transcript, words, notice? },
+      // and one audio WAV file per take, in the same order.
       payload: Schema.instanceOf(FormData).pipe(HttpApiSchema.asMultipart()),
-      success: Voice.pipe(HttpApiSchema.status(201)),
+      success: Voice,
       error: Invalid
     })
   )
   .add(
-    HttpApiEndpoint.post("generate", "/api/generate", {
-      payload: Schema.Struct({
-        voice_id: Schema.String,
-        text: Schema.String,
-        language: Language,
-        seed: Schema.Int
-      }),
+    HttpApiEndpoint.post("generate", "/api/renders", {
+      payload: Schema.Struct({ text: Schema.String }),
       success: Render.pipe(HttpApiSchema.status(202)),
       error: [NotFound, Conflict, Invalid, Busy]
     })
   )
-  .add(HttpApiEndpoint.get("renders", "/api/renders", { success: Schema.Array(Render) }))
   .add(
     HttpApiEndpoint.get("render", "/api/renders/:id", {
       params: RenderId,

@@ -1,7 +1,6 @@
-import fcntl
+import asyncio
 import os
-import shutil
-import uuid
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
@@ -11,24 +10,36 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFi
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from .audio import prepare_reference
-from .config import API_VERSION, DATA, LANGUAGES, recognizer_downloaded
-from .engine import ACTIVE, Engine
+from .config import API_VERSION, DATA, IDLE_TIMEOUT, VERSION, recognizer_downloaded
+from .engine import Engine
 from .recognizer import Recognizer
-from .storage import Store, timestamp, write_json
+from .storage import Store
+from .voice import build, parse_takes, summary
 
-LOCAL_HOSTS = {"127.0.0.1", "localhost"}
-# A 45-second enrollment at 48 kHz 16-bit mono is about 4.3 MB.
-MAX_TRANSCRIBE_BYTES = 8 * 1024 * 1024
+# A 90-second take at 48 kHz 16-bit mono is about 8.6 MB.
+MAX_TRANSCRIBE_BYTES = 12 * 1024 * 1024
+MAX_UPLOAD_BYTES = 32 * 1024 * 1024
+RENDER_FIELDS = ("id", "completed", "total", "status", "message", "duration")
+
+
+def receive(upload, path):
+    size = 0
+    with path.open("wb") as output:
+        while chunk := upload.file.read(1024 * 1024):
+            size += len(chunk)
+            if size > MAX_UPLOAD_BYTES:
+                raise ValueError("Each recording must be smaller than 32 MB.")
+            output.write(chunk)
+
+
+def public(job):
+    return {key: job[key] for key in RENDER_FIELDS}
 
 
 class Generation(BaseModel):
-    voice_id: str
     text: str = Field(min_length=1, max_length=12000)
-    language: str = "English"
-    seed: int = Field(default=12, ge=0, le=2**31 - 1)
 
     @field_validator("text")
     @classmethod
@@ -38,35 +49,35 @@ class Generation(BaseModel):
             raise ValueError("Write a script first")
         return value
 
-    @field_validator("language")
-    @classmethod
-    def language_supported(cls, value):
-        if value not in LANGUAGES:
-            raise ValueError("Unsupported language")
-        return value
 
-
-def create_app(data=DATA, engine_factory=Engine, recognizer=None, request_shutdown=None):
+def create_app(
+    data=DATA,
+    engine_factory=Engine,
+    recognizer=None,
+    request_shutdown=None,
+    idle_timeout=IDLE_TIMEOUT,
+):
     store = Store(Path(data))
-    engine = engine_factory(store)
     recognizer = recognizer or Recognizer()
+    engine = engine_factory(store, recognizer)
+
+    async def exit_when_idle():
+        while True:
+            await asyncio.sleep(min(30, idle_timeout))
+            idle = time.monotonic() - app.state.last_request
+            if idle >= idle_timeout and not engine.active():
+                request_shutdown()
+                return
 
     @asynccontextmanager
     async def lifespan(app):
-        # Keep the library lock compatible with existing Idiolect checkouts.
-        with (store.root / "studio.lock").open("a") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as error:
-                raise RuntimeError(
-                    "Idiolect is already running with this data directory."
-                ) from error
-            try:
-                engine.recover()
-                yield
-            finally:
-                engine.shutdown()
-                fcntl.flock(lock, fcntl.LOCK_UN)
+        watcher = asyncio.create_task(exit_when_idle()) if request_shutdown else None
+        try:
+            yield
+        finally:
+            if watcher:
+                watcher.cancel()
+            engine.shutdown()
 
     app = FastAPI(
         title="Idiolect engine",
@@ -78,14 +89,11 @@ def create_app(data=DATA, engine_factory=Engine, recognizer=None, request_shutdo
     app.state.store = store
     app.state.engine = engine
     app.state.recognizer = recognizer
-    app.state.request_shutdown = request_shutdown
+    app.state.last_request = time.monotonic()
 
     @app.middleware("http")
-    async def local_only(request: Request, call_next):
-        # Browsers attach Origin to cross-site requests; DNS rebinding changes Host.
-        host = (request.headers.get("host") or "").rsplit(":", 1)[0]
-        if "origin" in request.headers or host not in LOCAL_HOSTS:
-            return JSONResponse({"detail": "Only local command-line clients may connect."}, 403)
+    async def track_activity(request: Request, call_next):
+        app.state.last_request = time.monotonic()
         return await call_next(request)
 
     @app.exception_handler(RequestValidationError)
@@ -102,22 +110,19 @@ def create_app(data=DATA, engine_factory=Engine, recognizer=None, request_shutdo
         return {
             **engine.status(),
             "recognizer_downloaded": recognizer_downloaded(),
-            "languages": LANGUAGES,
             "service": "idiolect",
             "api": API_VERSION,
-            "data_directory": str(store.root.resolve()),
+            "version": VERSION,
             "pid": os.getpid(),
         }
 
     @app.post("/api/shutdown", status_code=202)
     def shutdown():
-        if any(job["status"] in ACTIVE for job in store.list_jobs()):
-            raise HTTPException(
-                409, "The engine has an active render. Wait for it to finish before stopping."
-            )
-        if app.state.request_shutdown is None:
-            raise HTTPException(409, "This engine was not started by idiolect serve.")
-        app.state.request_shutdown()
+        if engine.active():
+            raise HTTPException(409, "The engine has an active render.")
+        if request_shutdown is None:
+            raise HTTPException(409, "This engine cannot be stopped remotely.")
+        request_shutdown()
         return {"stopping": True}
 
     @app.post("/api/transcribe")
@@ -127,7 +132,7 @@ def create_app(data=DATA, engine_factory=Engine, recognizer=None, request_shutdo
         async for chunk in request.stream():
             body.extend(chunk)
             if len(body) > MAX_TRANSCRIBE_BYTES:
-                raise HTTPException(413, "Send at most 8 MB of audio per transcription.")
+                raise HTTPException(413, "Send at most 12 MB of audio per transcription.")
         audio = np.frombuffer(bytes(body[: len(body) // 2 * 2]), dtype="<i2")
         try:
             words = await run_in_threadpool(
@@ -137,91 +142,74 @@ def create_app(data=DATA, engine_factory=Engine, recognizer=None, request_shutdo
             raise HTTPException(409, str(error)) from error
         return {"words": words}
 
-    @app.get("/api/voices")
-    def voices():
-        return store.list_voices()
+    @app.get("/api/voice")
+    def voice():
+        return summary(saved_voice())
 
-    @app.post("/api/voices", status_code=201)
-    def add_voice(
-        name: Annotated[str, Form(min_length=1, max_length=60)],
-        transcript: Annotated[str, Form(min_length=1, max_length=3000)],
-        audio: Annotated[UploadFile, File()],
+    def saved_voice():
+        saved = store.voice()
+        if saved is None:
+            raise HTTPException(404, "Record your voice first with idiolect setup.")
+        return saved
+
+    @app.put("/api/voice")
+    def replace_voice(
+        takes: Annotated[str, Form(max_length=200_000)],
+        audio: Annotated[list[UploadFile], File()],
     ):
-        name, transcript = name.strip(), transcript.strip()
-        if not name or not transcript:
-            raise HTTPException(422, "Add a voice name and the exact words in your recording.")
-        voice_id = uuid.uuid4().hex
-        folder = store.voice_path(voice_id)
-        folder.mkdir()
-        source = folder / "upload"
+        """Replace your voice with a complete set of takes, one audio file per take."""
         try:
-            size = 0
-            with source.open("wb") as output:
-                while chunk := audio.file.read(1024 * 1024):
-                    size += len(chunk)
-                    if size > 32 * 1024 * 1024:
-                        raise ValueError("Reference audio must be smaller than 32 MB.")
-                    output.write(chunk)
-            duration = prepare_reference(source, folder / "reference.wav")
-            voice = {
-                "id": voice_id,
-                "name": name,
-                "transcript": transcript,
-                "duration": duration,
-                "created_at": timestamp(),
-            }
-            with store.lock:
-                write_json(folder / "voice.json", voice)
-            return voice
+            parsed = parse_takes(takes)
+        except ValidationError as error:
+            raise HTTPException(422, f"Invalid takes: {error.errors()[0]['msg']}") from error
+        if len(audio) != len(parsed.root):
+            raise HTTPException(422, "Send one recording for each take.")
+        try:
+            with store.replace_voice() as folder:
+                sources = []
+                for index, upload in enumerate(audio):
+                    source = folder / f"upload-{index}"
+                    receive(upload, source)
+                    sources.append(source)
+                saved = build(folder, parsed, sources)
+                for source in sources:
+                    source.unlink()
+            return summary(saved)
         except ValueError as error:
-            shutil.rmtree(folder)
             raise HTTPException(422, str(error)) from error
-        except Exception:
-            shutil.rmtree(folder)
-            raise
         finally:
-            source.unlink(missing_ok=True)
-            audio.file.close()
+            for upload in audio:
+                upload.file.close()
 
-    @app.post("/api/generate", status_code=202)
+    @app.post("/api/renders", status_code=202)
     def generate(request: Generation):
-        try:
-            voice = store.voice(request.voice_id)
-        except (ValueError, FileNotFoundError):
-            raise HTTPException(404, "Choose a saved voice first")
+        saved = saved_voice()
         if not engine.status()["model_downloaded"]:
-            raise HTTPException(
-                409, "The model is not downloaded yet. Run idiolect download first."
-            )
+            raise HTTPException(409, "The speech model is missing. Run idiolect setup first.")
         try:
-            return engine.submit(voice, request.text, request.language, request.seed)
+            return public(engine.submit(saved, request.text))
         except ValueError as error:
             raise HTTPException(429, str(error)) from error
 
-    @app.get("/api/renders")
-    def renders():
-        return store.list_jobs()
+    def find(job_id):
+        try:
+            return engine.job(job_id)
+        except KeyError:
+            raise HTTPException(404, "Render not found")
 
     @app.get("/api/renders/{job_id}")
     def render(job_id: str):
-        try:
-            return store.job(job_id)
-        except (ValueError, FileNotFoundError):
-            raise HTTPException(404, "Render not found")
+        return public(find(job_id))
 
     @app.post("/api/renders/{job_id}/cancel")
     def cancel(job_id: str):
-        render(job_id)
-        return engine.cancel(job_id)
+        find(job_id)
+        return public(engine.cancel(job_id))
 
     @app.get("/api/renders/{job_id}/audio")
     def render_audio(job_id: str):
-        job = render(job_id)
-        if job["status"] != "ready":
+        if find(job_id)["status"] != "ready":
             raise HTTPException(409, "This render is not ready yet")
-        return FileResponse(
-            store.render_path(job_id) / "voiceover.wav",
-            media_type="audio/wav",
-        )
+        return FileResponse(engine.audio(job_id), media_type="audio/wav")
 
     return app
