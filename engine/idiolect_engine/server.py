@@ -12,7 +12,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from .config import API_VERSION, DATA, IDLE_TIMEOUT, recognizer_downloaded
+from .config import API_VERSION, DATA, IDLE_TIMEOUT, VERSION, recognizer_downloaded
 from .engine import Engine
 from .recognizer import Recognizer
 from .storage import Store
@@ -112,6 +112,7 @@ def create_app(
             "recognizer_downloaded": recognizer_downloaded(),
             "service": "idiolect",
             "api": API_VERSION,
+            "version": VERSION,
             "pid": os.getpid(),
         }
 

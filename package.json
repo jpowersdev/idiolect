@@ -1,19 +1,28 @@
 {
-  "name": "idiolect",
+  "name": "@jpowersdev/idiolect",
   "version": "0.2.0",
   "description": "Local voice cloning from the terminal",
-  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jpowersdev/idiolect.git"
+  },
   "type": "module",
   "bin": {
     "idiolect": "src/main.ts"
   },
   "files": [
-    "src"
+    "src",
+    "dist/engine"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "start": "bun src/main.ts",
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "bundle-engine": "rm -rf dist/engine && uv build --project engine --wheel --quiet --out-dir dist/engine && uv export --project engine --frozen --no-dev --no-emit-project --format requirements-txt --quiet --output-file dist/engine/requirements.txt && rm dist/engine/.gitignore",
+    "prepack": "bun run bundle-engine"
   },
   "dependencies": {
     "@effect/platform-bun": "4.0.2",

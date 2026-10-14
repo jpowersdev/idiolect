@@ -1,5 +1,9 @@
 import os
+from importlib.metadata import version
 from pathlib import Path
+
+# The CLI requires an engine of exactly its own release.
+VERSION = version("idiolect-engine")
 
 # The same directory as the CLI's, so the engine can also run on its own.
 DATA = Path(os.environ.get("IDIOLECT_DATA") or Path.home() / ".idiolect").resolve()

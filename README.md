@@ -13,26 +13,29 @@ idiolect doctor                                 # Check your Mac, models, and au
 
 You need an Apple silicon Mac with at least 16 GB of memory.
 
-With Nix:
-
 ```sh
-nix profile install github:jpowersdev/idiolect
+brew install bun uv sox
+bun add -g @jpowersdev/idiolect
+idiolect setup
 ```
 
-Without Nix, install [uv](https://docs.astral.sh/uv/), [Bun](https://bun.sh), and SoX (`brew install sox`), then:
+Setup installs the speech engine and downloads the models the first time, after asking.
+
+With Nix, run it directly:
 
 ```sh
-uv tool install "git+ssh://git@github.com/jpowersdev/idiolect.git#subdirectory=engine"
-bun add -g git+ssh://git@github.com/jpowersdev/idiolect.git
+nix run github:jpowersdev/idiolect -- setup
 ```
+
+Or add `github:jpowersdev/idiolect` as a flake input and put `inputs.idiolect.packages.${system}.default` in your nix-darwin or NixOS packages.
 
 ## Record your voice
 
-Run `idiolect setup`. The first time, it downloads about 5 GB of models. Then it shows six short scripts, about four minutes of reading in all. For each one, press Enter and read it in your everyday voice. Recording stops by itself after the last words; press `r` to start a script over. Afterwards, setup plays a few sentences in your new voice.
+Run `idiolect setup`. The first time, it asks to install the speech engine (about 1 GB) and download the models (about 5 GB). Then it shows six short scripts, about four minutes of reading in all. For each one, press Enter and read it in your everyday voice. Recording stops by itself after the last words; press `r` to start a script over. Afterwards, setup plays a few sentences in your new voice.
 
 Use a quiet room and sit close to the microphone. To use a microphone other than the default, pass `--device "MacBook Pro Microphone"` (or another input's name). If setup only hears silence, give your terminal app microphone access in System Settings → Privacy & Security → Microphone.
 
-Running setup again replaces your voice. Only clone voices you have permission to use.
+Running setup again installs anything missing, such as an engine update after you upgrade Idiolect, and asks whether to record a new voice. Only clone voices you have permission to use.
 
 ## Speak
 

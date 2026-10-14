@@ -8,3 +8,5 @@ __pycache__/
 .env
 result
 node_modules/
+dist/
+*.tgz

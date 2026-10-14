@@ -13,6 +13,8 @@ export const ApiVersion = 1
 export const Status = Schema.Struct({
   service: Schema.Literal("idiolect"),
   api: Schema.Int,
+  /** The engine's release, which must match the CLI's. */
+  version: Schema.String,
   pid: Schema.Int,
   /** Which speech model the engine uses: chosen for the hardware, or set by IDIOLECT_MODEL. */
   model: Schema.String,

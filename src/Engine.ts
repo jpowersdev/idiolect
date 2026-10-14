@@ -8,12 +8,10 @@ import { closeSync, openSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { ApiVersion, EngineApi, EngineGroup, type Status } from "./Api.ts"
 import { fail, IdiolectError } from "./Errors.ts"
+import { engineExecutable, Version } from "./Install.ts"
 import { Paths, type PathsShape } from "./Paths.ts"
 
 type Client = HttpApiClient.Client<typeof EngineGroup>
-
-/** The engine executable, found on PATH. */
-export const EngineCommand = "idiolect-engine"
 
 export interface EngineShape {
   /** The typed engine API. Wrap calls with `call` to explain failures. */
@@ -36,11 +34,6 @@ export const usesWantedModel = (status: Pick<Status, "model" | "model_requested"
   wanted === undefined ? !status.model_requested : status.model === wanted
 
 export const socketPath = (paths: PathsShape) => join(paths.data, "engine.sock")
-
-const notInstalled = fail(
-  `The speech engine (${EngineCommand}) is not on your PATH. Install Idiolect with Nix, ` +
-    "or install the engine with `uv tool install ./engine` from a checkout."
-)
 
 export const engineEnvironment = (paths: PathsShape): Record<string, string> => ({
   IDIOLECT_DATA: paths.data,
@@ -98,6 +91,7 @@ export class Engine extends Context.Service<Engine, EngineShape>()("idiolect/Eng
       const call = <A, E>(effect: Effect.Effect<A, E>) => Effect.mapError(effect, explain)
       const environment = engineEnvironment(paths)
       const log = join(paths.data, "engine.log")
+      const executable = engineExecutable(paths)
 
       const status = api.status().pipe(
         Effect.timeout(Duration.seconds(2)),
@@ -125,7 +119,7 @@ export class Engine extends Context.Service<Engine, EngineShape>()("idiolect/Eng
       const probe = Effect.gen(function*() {
         const running = yield* status
         if (Option.isNone(running)) return running
-        if (running.value.api !== ApiVersion) {
+        if (running.value.api !== ApiVersion || running.value.version !== Version) {
           yield* retire("from another Idiolect version")
           return Option.none<Status>()
         }
@@ -136,15 +130,14 @@ export class Engine extends Context.Service<Engine, EngineShape>()("idiolect/Eng
         return running
       })
 
-      const installed = Effect.sync(() => Bun.which(EngineCommand) !== null)
-
-      const start = Effect.try({
-        try: () => {
+      const start = (command: string) =>
+        Effect.try({
+          try: () => {
           const output = openSync(log, "a")
           try {
             // Detached so the engine keeps the model loaded after this command exits.
             // It exits by itself once idle.
-            const child = spawn(EngineCommand, ["serve"], {
+            const child = spawn(command, ["serve"], {
               detached: true,
               stdio: ["ignore", output, output],
               cwd: paths.data,
@@ -169,9 +162,9 @@ export class Engine extends Context.Service<Engine, EngineShape>()("idiolect/Eng
       const ensure = Effect.gen(function*() {
         const running = yield* probe
         if (Option.isSome(running)) return running.value
-        if (!(yield* installed)) return yield* notInstalled
+        const command = yield* executable
         process.stderr.write("Starting the local voice engine…\n")
-        const child = yield* start
+        const child = yield* start(command)
         // Another command may start an engine at the same moment; either one will do.
         for (let attempt = 0; attempt < 300; attempt++) {
           const started = yield* status
@@ -184,9 +177,9 @@ export class Engine extends Context.Service<Engine, EngineShape>()("idiolect/Eng
 
       const foreground = (args: ReadonlyArray<string>) =>
         Effect.gen(function*() {
-          if (!(yield* installed)) return yield* notInstalled
+          const command = yield* executable
           const handle = yield* spawner.spawn(
-            ChildProcess.make(EngineCommand, args, {
+            ChildProcess.make(command, args, {
               env: environment,
               extendEnv: true,
               stdin: "inherit",

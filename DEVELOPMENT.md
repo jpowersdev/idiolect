@@ -26,6 +26,13 @@ The contract test starts the real engine HTTP server, with stand-ins for the mod
 - **Cloning.** The engine clones from the first clip that ends a sentence. `engine/idiolect_engine/models.py` describes each model and chooses one by memory: Apple GPUs run VoxCPM2 in full precision, about 15 GB, and Qwen3-TTS in half precision, about 8 GB.
 - **Rendering.** Text is split into sections by paragraph, then by sentence. Each section is checked with the recognizer, rendered again if garbled or faded, cut where its last words end, and level-matched before joining.
 
+## Releasing
+
+The npm package carries the engine: packing builds it as a wheel, with `engine/uv.lock` exported as pinned requirements, into `dist/engine`. Without `idiolect-engine` on PATH, `idiolect setup` asks to install that bundle with uv into `~/.idiolect/engine`, and installs it again whenever the CLI's version changes. Nix and the development shell put `idiolect-engine` on PATH instead.
+
+1. Set the same version in `package.json` and `engine/pyproject.toml` (a test checks they match).
+2. `bun publish`. Packing runs `bun run bundle-engine` first.
+
 ## Nix
 
 When `bun.lock` changes, update `outputHash` for the CLI's dependencies in `flake.nix`: build once with an empty hash and copy the one Nix reports. The engine's environment comes straight from `engine/uv.lock` through [uv2nix](https://github.com/pyproject-nix/uv2nix). VoxCPM's training, denoising, and web UI dependencies are left out in `engine/pyproject.toml`; generation never imports them.

@@ -2,6 +2,7 @@ import io
 import json
 import re
 import time
+from importlib.metadata import version
 from itertools import pairwise
 from threading import Event
 
@@ -338,6 +339,7 @@ def test_errors_are_plain_messages(client):
 def test_status_reports_contract_version(client):
     status = client.get("/api/status").json()
     assert status["service"] == "idiolect" and status["api"] == 1
+    assert status["version"] == version("idiolect-engine")
     assert "recognizer_downloaded" in status
 
 
