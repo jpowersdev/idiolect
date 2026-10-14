@@ -6,6 +6,7 @@
     "type": "git",
     "url": "git+https://github.com/jpowersdev/idiolect.git"
   },
+  "license": "MIT",
   "type": "module",
   "bin": {
     "idiolect": "src/main.ts"

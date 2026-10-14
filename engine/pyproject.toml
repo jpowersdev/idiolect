@@ -2,6 +2,7 @@
 name = "idiolect-engine"
 version = "0.2.0"
 description = "Idiolect's local speech engine: VoxCPM2 voice cloning and faster-whisper reading."
+license = "MIT"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "qwen-tts==0.1.1",
