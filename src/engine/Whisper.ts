@@ -9,6 +9,7 @@ import { Effect } from "effect"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import type { Word } from "../Api.ts"
+import { release } from "./MiniCpm.ts"
 
 type T = Tensor.Any
 type Weights = Readonly<Record<string, T>>
@@ -117,6 +118,7 @@ const logMel = (recognizer: Recognizer, audio: Float32Array) =>
     )
     const [peak] = yield* Tensor.compute([yield* Tensor.max(log10)])
     const floor = (yield* Tensor.toNumberArray(peak!))[0]! - 8
+    yield* release([peak])
     const clamped = yield* Tensor.maximum(log10, yield* Tensor.constantLike(log10, floor))
     const [features] = yield* Tensor.compute([
       yield* Tensor.div(yield* Tensor.add(clamped, yield* Tensor.constantLike(clamped, 4)), yield* Tensor.constantLike(clamped, 4))
@@ -228,14 +230,15 @@ export const load = (directory: string) =>
     const stored = yield* Safetensors.load(join(directory, "model.safetensors"))
     // Projections transposed to [in, out] once; lookup tables stay as they are.
     const lookups = new Set(["model.decoder.embed_tokens.weight", "model.decoder.embed_positions.weight", "model.encoder.embed_positions.weight"])
-    const names = Object.keys(stored).filter((name) => name.endsWith(".weight") && stored[name]!.shape.length === 2 && !lookups.has(name))
-    const transposed = yield* Tensor.compute([
-      ...(yield* Effect.forEach(names, (name) => Tensor.transpose(stored[name]!, [1, 0]))),
-      yield* Tensor.transpose(stored["model.decoder.embed_tokens.weight"]!, [1, 0])
-    ])
     const weights: Record<string, T> = { ...stored }
-    names.forEach((name, i) => weights[name] = transposed[i]!)
-    weights["model.decoder.embed_tokens.weight.transposed"] = transposed[names.length]!
+    for (const name of Object.keys(stored)) {
+      if (!name.endsWith(".weight") || stored[name]!.shape.length !== 2 || lookups.has(name)) continue
+      weights[name] = (yield* Tensor.compute([yield* Tensor.transpose(stored[name]!, [1, 0])]))[0]!
+      yield* release([stored[name]!])
+    }
+    weights["model.decoder.embed_tokens.weight.transposed"] = (yield* Tensor.compute([
+      yield* Tensor.transpose(stored["model.decoder.embed_tokens.weight"]!, [1, 0])
+    ]))[0]!
     const vocabulary = stored["model.decoder.embed_tokens.weight"]!.shape[0]!
 
     const mel = yield* Tensor.makeInput(0, yield* Tensor.zeros([80, FRAMES]))
@@ -285,8 +288,11 @@ const decodeWindow = (recognizer: Recognizer, cross: ReadonlyArray<T>) =>
           ...caches,
           ...cross
         ])
+        yield* release(caches)
         caches = results.slice(1)
-        return Number((yield* Tensor.toTypedArray(results[0]!))[0])
+        const token = Number((yield* Tensor.toTypedArray(results[0]!))[0])
+        yield* release([results[0]])
+        return token
       })
     yield* run(generation.decoder_start_token_id, 0, recognizer.suppressed.always)
     let next = yield* run(generation.no_timestamps_token_id, 1, recognizer.suppressed.atStart)
@@ -295,6 +301,7 @@ const decodeWindow = (recognizer: Recognizer, cross: ReadonlyArray<T>) =>
       tokens.push(next)
       next = yield* run(next, tokens.length + 1, recognizer.suppressed.always)
     }
+    yield* release(caches)
     return tokens
   })
 
@@ -333,6 +340,7 @@ const alignmentWeights = (recognizer: Recognizer, cross: ReadonlyArray<T>, token
       const flat = (yield* Tensor.toTypedArray(tensor)) as Float32Array
       result.push(Array.from({ length: tokens.length }, (_, t) => flat.subarray(t * frames, (t + 1) * frames)))
     }
+    yield* release(computed)
     return result
   })
 
@@ -527,14 +535,21 @@ export const transcribe = (recognizer: Recognizer, audio: Float32Array) =>
     for (const { end, start } of windows(audio)) {
       const window = audio.subarray(start, end)
       if (peakLevel(window) < SILENCE) continue
-      const cross = yield* Tensor.runProgram(recognizer.encoder, [yield* logMel(recognizer, window)])
+      const features = yield* logMel(recognizer, window)
+      const cross = yield* Tensor.runProgram(recognizer.encoder, [features])
+      yield* release([features])
       const tokens = yield* decodeWindow(recognizer, cross)
-      if (tokens.length === 0) continue
+      if (tokens.length === 0) {
+        yield* release(cross)
+        continue
+      }
       const { generation } = recognizer
       const frames = Math.min(AUDIO_FRAMES, Math.max(1, Math.floor((window.length / SAMPLE_RATE) * 50)))
       const sequence = [generation.decoder_start_token_id, generation.no_timestamps_token_id, ...tokens, generation.eos_token_id]
       const offset = start / SAMPLE_RATE
-      for (const word of wordTimings(yield* alignmentWeights(recognizer, cross, sequence, frames), tokens, generation.eos_token_id, recognizer.decode)) {
+      const weights = yield* alignmentWeights(recognizer, cross, sequence, frames)
+      yield* release(cross)
+      for (const word of wordTimings(weights, tokens, generation.eos_token_id, recognizer.decode)) {
         words.push({ text: word.text, start: Math.round((word.start + offset) * 100) / 100, end: Math.round((word.end + offset) * 100) / 100 })
       }
     }

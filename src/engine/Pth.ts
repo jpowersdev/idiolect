@@ -217,3 +217,29 @@ export const foldWeightNorm = (tensors: Map<string, RawTensor>) => {
   }
   return out
 }
+
+/**
+ * The tensors as a safetensors file, which effect-torch loads straight into GPU memory: far
+ * leaner than building each tensor from a host array.
+ */
+export const toSafetensors = (tensors: Map<string, RawTensor>) => {
+  const header: Record<string, { dtype: string; shape: ReadonlyArray<number>; data_offsets: [number, number] }> = {}
+  let offset = 0
+  for (const [name, { data, shape }] of tensors) {
+    header[name] = { dtype: data instanceof Float32Array ? "F32" : "I32", shape, data_offsets: [offset, offset + data.byteLength] }
+    offset += data.byteLength
+  }
+  let json = JSON.stringify(header)
+  // The data starts 8-byte aligned.
+  json += " ".repeat((8 - ((8 + json.length) % 8)) % 8)
+  const encoded = new TextEncoder().encode(json)
+  const bytes = new Uint8Array(8 + encoded.length + offset)
+  new DataView(bytes.buffer).setBigUint64(0, BigInt(encoded.length), true)
+  bytes.set(encoded, 8)
+  let at = 8 + encoded.length
+  for (const { data } of tensors.values()) {
+    bytes.set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength), at)
+    at += data.byteLength
+  }
+  return bytes
+}

@@ -10,8 +10,7 @@ import { Effect } from "effect"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import * as Codec from "./Codec.ts"
-import type { T, Weights } from "./MiniCpm.ts"
-import { foldWeightNorm, readStateDict } from "./Pth.ts"
+import { release, type Weights } from "./MiniCpm.ts"
 import { resample } from "./Signal.ts"
 import * as VoxCpm from "./VoxCpm.ts"
 
@@ -51,11 +50,7 @@ export const load = (directory: string, dtype: Tensor.DType) =>
       dtype,
       rope: { theta: config.lm_config.rope_theta, factors: config.lm_config.rope_scaling.short_factor }
     })
-    const stored = foldWeightNorm(readStateDict(readFileSync(join(directory, "audiovae.pth"))))
-    const tensors: Record<string, T> = {}
-    // Its one integer tensor, the output-rate buckets, is fixed in Codec.ts.
-    for (const [name, { data, shape }] of stored) if (data instanceof Float32Array) tensors[name] = yield* Tensor.fromTypedArray(data, shape)
-    const codec = yield* Codec.prepare(tensors)
+    const codec = yield* Codec.load(join(directory, "audiovae.pth"))
     const tokenizer = yield* Tokenizers.fromFile(join(directory, "tokenizer.json"), {
       padding: { _tag: "None" },
       truncation: { _tag: "None" },
@@ -75,6 +70,7 @@ const encodeClip = (speech: Speech, audio: Float32Array, padding: "start" | "end
     const [latents] = yield* Tensor.compute([yield* Codec.encode(speech.codec, yield* Tensor.fromTypedArray(padded, [1, 1, padded.length]))])
     const channelMajor = (yield* Tensor.toTypedArray(latents!)) as Float32Array
     const frames = latents!.shape[2]!
+    yield* release([latents])
     const patches = new Float32Array(frames * LATENT)
     for (let frame = 0; frame < frames; frame++) {
       for (let c = 0; c < LATENT; c++) patches[frame * LATENT + c] = channelMajor[c * frames + frame]!
@@ -102,7 +98,9 @@ const decode = (speech: Speech, patches: Float32Array) =>
       for (let c = 0; c < LATENT; c++) channelMajor[c * frames + frame] = patches[frame * LATENT + c]!
     }
     const [audio] = yield* Tensor.compute([yield* Codec.decode(speech.codec, yield* Tensor.fromTypedArray(channelMajor, [1, LATENT, frames]))])
-    return (yield* Tensor.toTypedArray(audio!)) as Float32Array
+    const samples = (yield* Tensor.toTypedArray(audio!)) as Float32Array
+    yield* release([audio])
+    return samples
   })
 
 export interface SpeakOptions {

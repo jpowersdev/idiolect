@@ -8,7 +8,6 @@ import { Tensor } from "@effect-torch/core"
 import { Effect } from "effect"
 import { existsSync, readFileSync } from "node:fs"
 import * as Codec from "../../src/engine/Codec.ts"
-import { foldWeightNorm, readStateDict } from "../../src/engine/Pth.ts"
 
 const home = process.env.HOME!
 const model = `${home}/.idiolect/models/voxcpm2/audiovae.pth`
@@ -24,11 +23,7 @@ test.skipIf(!enabled)("encoding and decoding match PyTorch", async () => {
   const audio = read("vae-audio-16k")
   const latents = read("vae-latents")
   const [encoded, decoded] = await Effect.runPromise(Effect.gen(function*() {
-    const stored: Record<string, Tensor.Any> = {}
-    for (const [name, { data, shape }] of foldWeightNorm(readStateDict(readFileSync(model)))) {
-      if (data instanceof Float32Array) stored[name] = yield* Tensor.fromTypedArray(data, shape)
-    }
-    const weights = yield* Codec.prepare(stored)
+    const weights = yield* Codec.load(model)
     const outputs = yield* Tensor.compute([
       yield* Codec.encode(weights, yield* Tensor.fromTypedArray(audio, [1, 1, audio.length])),
       yield* Codec.decode(weights, yield* Tensor.fromTypedArray(latents, [1, 64, latents.length / 64]))

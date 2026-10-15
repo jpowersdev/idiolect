@@ -15,6 +15,7 @@ import {
   HEAD_DIM,
   KV_HEADS,
   linear,
+  release,
   ropeTables,
   ropeValues,
   seedCache,
@@ -269,17 +270,25 @@ const compile = (w: Weights, dtype: Tensor.DType, rope: RopeConfig) =>
 /** Load VoxCPM2 from its checkpoint (stored in bfloat16) at `dtype`, and compile its programs. */
 export const load = (stored: Readonly<Record<string, T>>, options: { readonly dtype: Tensor.DType; readonly rope: RopeConfig }) =>
   Effect.gen(function*() {
-    const names = Object.keys(stored)
-    const cast = yield* Tensor.compute(yield* Effect.forEach(names, (name) => Tensor.cast(stored[name]!, options.dtype)))
-    const weights = yield* transposeProjections(
-      Object.fromEntries(names.map((name, i) => [name, cast[i]!])),
-      new Set(["base_lm.embed_tokens.weight"])
-    )
+    const cast: Record<string, T> = { ...stored }
+    for (const name of Object.keys(stored)) {
+      if (stored[name]!.dtype === options.dtype) continue
+      cast[name] = (yield* Tensor.compute([yield* Tensor.cast(stored[name]!, options.dtype)]))[0]!
+      yield* release([stored[name]!])
+    }
+    const weights = yield* transposeProjections(cast, new Set(["base_lm.embed_tokens.weight"]))
     const programs = yield* compile(weights, options.dtype, options.rope)
     return { weights, dtype: options.dtype, rope: options.rope, programs } satisfies Model
   })
 
-const asF32 = (x: T) => Effect.flatMap(Effect.flatMap(Tensor.cast(x, "f32"), (y) => Tensor.compute([y])), ([y]) => Tensor.toTypedArray(y!)) as Effect.Effect<Float32Array, Tensor.TensorError, never>
+/** A tensor's values as float32, read back to the host. */
+const asF32 = (x: T) =>
+  Effect.gen(function*() {
+    const [y] = yield* Tensor.compute([yield* Tensor.cast(x, "f32")])
+    const values = (yield* Tensor.toTypedArray(y!)) as Float32Array
+    yield* release([y])
+    return values
+  })
 
 export interface GenerateOptions {
   readonly minLength: number
@@ -338,12 +347,16 @@ export const generate = (model: Model, prompt: Prompt, options: GenerateOptions)
       let x: T = yield* typed(options.noise?.(i) ?? noise(PATCH * LATENT), [1, PATCH, LATENT])
       for (let s = 2; s <= TIMESTEPS; s++) {
         const dt = yield* typed(Float32Array.of(schedule[s - 1]! - schedule[s]!), [1, 1, 1])
-        x = (yield* Tensor.runProgram(programs.denoise, [x, conditioning!, previous, times[s - 1]!, dt]))[0]!
+        const next = (yield* Tensor.runProgram(programs.denoise, [x, conditioning!, previous, times[s - 1]!, dt]))[0]!
+        yield* release([x])
+        x = next
       }
       patches.push(yield* asF32(x))
+      yield* release([previous])
       previous = x
 
       const [keepGoing, finish] = yield* asF32(stop!)
+      yield* release([stop])
       if (i > options.minLength && finish! > keepGoing!) break
 
       // The new patch through the local encoder, then one step of each language model.
@@ -361,12 +374,15 @@ export const generate = (model: Model, prompt: Prompt, options: GenerateOptions)
         visibleTensor,
         ...baseCaches
       ])
+      yield* release([embed, lm, ...baseCaches])
       ;[lm] = baseOut
       stop = baseOut[2]
       baseCaches = baseOut.slice(3)
       const residualOut = yield* Tensor.runProgram(programs.residualStep, [baseOut[1]!, slotTensor, visibleTensor, lm!, ...residualCaches])
+      yield* release([baseOut[1], conditioning, ...residualCaches])
       conditioning = residualOut[0]
       residualCaches = residualOut.slice(1)
     }
+    yield* release([previous, lm, conditioning, stop, ...baseCaches, ...residualCaches])
     return patches
   })

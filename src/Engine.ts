@@ -28,6 +28,17 @@ export interface EngineShape {
 
 export const socketPath = (paths: PathsShape) => join(paths.data, "engine.sock")
 
+/**
+ * effect-torch keeps freed GPU memory for reuse until live memory passes a budget, by default
+ * half of what the GPU may use: on a large Mac, many gigabytes the engine never needs. The
+ * model takes about 5.5 GB; past 8, freed memory goes back to the system. Set either variable
+ * to override.
+ */
+const engineMemory = {
+  EFFECT_TORCH_MEMORY_BUDGET_MB: "8192",
+  EFFECT_TORCH_WORKSPACE_POOL_MB: "1024"
+}
+
 /** The engine's final error from its log, e.g. another engine already owning the data. */
 const lastError = (log: string) => {
   try {
@@ -118,7 +129,7 @@ export class Engine extends Context.Service<Engine, EngineShape>()("idiolect/Eng
               detached: true,
               stdio: ["ignore", output, output],
               cwd: paths.data,
-              env: { ...process.env, IDIOLECT_DATA: paths.data }
+              env: { ...engineMemory, ...process.env, IDIOLECT_DATA: paths.data }
             })
             const state = { exited: false }
             child.on("exit", () => {

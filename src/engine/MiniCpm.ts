@@ -97,12 +97,22 @@ export const linear = (w: Weights, name: string, x: T) =>
  */
 export const transposeProjections = (weights: Record<string, T>, keep: ReadonlySet<string>) =>
   Effect.gen(function*() {
-    const names = Object.keys(weights).filter((name) => name.endsWith(".weight") && weights[name]!.shape.length === 2 && !keep.has(name))
-    const transposed = yield* Tensor.compute(yield* Effect.forEach(names, (name) => Tensor.transpose(weights[name]!, [1, 0])))
     const out = { ...weights }
-    names.forEach((name, i) => out[name] = transposed[i]!)
+    for (const name of Object.keys(weights)) {
+      if (!name.endsWith(".weight") || weights[name]!.shape.length !== 2 || keep.has(name)) continue
+      // One at a time, freeing each original, so loading never holds two copies of the model.
+      out[name] = (yield* Tensor.compute([yield* Tensor.transpose(weights[name]!, [1, 0])]))[0]!
+      yield* release([weights[name]!])
+    }
     return out as Weights
   })
+
+/**
+ * Free tensors' GPU memory for reuse. effect-torch frees only when asked, never on garbage
+ * collection; graphs not yet computed hold nothing and are skipped.
+ */
+export const release = (tensors: Iterable<T | undefined>) =>
+  Tensor.clearAll([...tensors].filter((x): x is Tensor.Concrete => x !== undefined && Tensor.isTensor(x)))
 
 const feedForward = (w: Weights, layer: string, x: T) =>
   Effect.gen(function*() {

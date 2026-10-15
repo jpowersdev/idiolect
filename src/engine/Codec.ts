@@ -7,9 +7,13 @@
  * slices of the input, and transposed ones as one multiply and an overlap-add: far faster on the
  * GPU than direct convolution at these sizes.
  */
-import { Tensor } from "@effect-torch/core"
+import { Safetensors, Tensor } from "@effect-torch/core"
 import { Effect } from "effect"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { dirname, join } from "node:path"
 import type { T, Weights } from "./MiniCpm.ts"
+import { foldWeightNorm, type RawTensor, readStateDict, toSafetensors } from "./Pth.ts"
 
 export const INPUT_RATE = 16000
 export const OUTPUT_RATE = 48000
@@ -23,30 +27,46 @@ const OUTPUT_BUCKET = 3
 
 const size = (x: T) => x.shape.reduce((a, b) => a * b, 1)
 
+/** Copy `w` reordered: output element `to(i, j, k)` of a [a, b, c] array comes from (i, j, k). */
+const reorder = (w: RawTensor, to: (i: number, j: number, k: number) => number) => {
+  const [a, b, c] = w.shape as [number, number, number]
+  const out = new Float32Array(w.data.length)
+  for (let i = 0; i < a; i++) for (let j = 0; j < b; j++) for (let k = 0; k < c; k++) out[to(i, j, k)] = w.data[(i * b + j) * c + k]!
+  return out
+}
+
 /**
  * Weights rearranged for matrix multiplies: a convolution's [out, in, kernel] as [out, kernel · in],
  * a transposed convolution's [in, out, kernel] as [kernel · out, in], biases and Snake's α as
- * columns. Depthwise convolutions keep their shape.
+ * columns. Depthwise convolutions keep their shape. Its one integer tensor, the output-rate
+ * buckets, is fixed above, and dropped.
  */
-export const prepare = (stored: Weights) =>
+export const arrange = (stored: Map<string, RawTensor>) => {
+  const arranged = new Map<string, RawTensor>()
+  for (const [name, w] of stored) {
+    if (!(w.data instanceof Float32Array)) continue
+    const [a, b, c] = w.shape as [number, number, number]
+    if (name.endsWith(".alpha") || name.endsWith(".bias")) {
+      arranged.set(name, { data: w.data, shape: [w.data.length, 1] })
+    } else if (!name.endsWith(".weight") || w.shape.length !== 3 || /\.block\.\d+\.block\.1\.weight$|^decoder\.model\.0\./.test(name)) {
+      // Depthwise convolutions: in each residual unit, and the decoder's first layer.
+      arranged.set(name, w)
+    } else if (/^decoder\.model\.\d+\.block\.1\.weight$/.test(name)) {
+      // Transposed convolutions are the decoder blocks' first layer: [in, out, kernel].
+      arranged.set(name, { data: reorder(w, (i, o, k) => (k * b + o) * a + i), shape: [c * b, a] })
+    } else {
+      arranged.set(name, { data: reorder(w, (o, i, k) => (o * c + k) * b + i), shape: [a, c * b] })
+    }
+  }
+  return arranged
+}
+
+/** The codec from VoxCPM2's audiovae.pth, rearranged and loaded into GPU memory. */
+export const load = (path: string) =>
   Effect.gen(function*() {
-    const names = Object.keys(stored)
-    const prepared = yield* Effect.forEach(names, (name) =>
-      Effect.gen(function*() {
-        const w = stored[name]!
-        if (name.endsWith(".alpha") || name.endsWith(".bias")) return yield* Tensor.reshape(w, [size(w), 1])
-        // Depthwise convolutions: in each residual unit, and the decoder's first layer.
-        if (!name.endsWith(".weight") || w.shape.length !== 3 || /\.block\.\d+\.block\.1\.weight$|^decoder\.model\.0\./.test(name)) return w
-        // Transposed convolutions are the decoder blocks' first layer.
-        if (/^decoder\.model\.\d+\.block\.1\.weight$/.test(name)) {
-          const [input, output, kernel] = w.shape as [number, number, number]
-          return yield* Tensor.reshape(yield* Tensor.transpose(w, [2, 1, 0]), [kernel * output, input])
-        }
-        const [output, input, kernel] = w.shape as [number, number, number]
-        return yield* Tensor.reshape(yield* Tensor.transpose(w, [0, 2, 1]), [output, kernel * input])
-      }))
-    const computed = yield* Tensor.compute(prepared)
-    return Object.fromEntries(names.map((name, i) => [name, computed[i]!])) as Weights
+    const staged = join(mkdtempSync(join(tmpdir(), "idiolect-codec-")), "codec.safetensors")
+    writeFileSync(staged, toSafetensors(arrange(foldWeightNorm(readStateDict(readFileSync(path))))))
+    return (yield* Effect.ensuring(Safetensors.load(staged), Effect.sync(() => rmSync(dirname(staged), { recursive: true, force: true })))) as Weights
   })
 
 /** x + sin²(αx) / α, per channel. */
