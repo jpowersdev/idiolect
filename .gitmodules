@@ -1,0 +1,3 @@
+[submodule "vendor/effect-torch"]
+	path = vendor/effect-torch
+	url = https://github.com/mikearnaldi/effect-torch.git

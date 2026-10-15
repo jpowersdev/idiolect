@@ -23,14 +23,28 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "bundle-engine": "rm -rf dist/engine && uv build --project engine --wheel --quiet --out-dir dist/engine && uv export --project engine --frozen --no-dev --no-emit-project --format requirements-txt --quiet --output-file dist/engine/requirements.txt && rm dist/engine/.gitignore",
-    "prepack": "bun run bundle-engine"
+    "prepack": "bun run bundle-engine",
+    "build-native": "scripts/build-native.sh"
   },
   "dependencies": {
+    "@effect-torch/backend-apple-native": "workspace:*",
+    "@effect-torch/core": "workspace:*",
+    "@effect-torch/tokenizers": "workspace:*",
     "@effect/platform-bun": "4.0.2",
     "effect": "4.0.2"
   },
   "devDependencies": {
     "@types/bun": "^1.4.2",
     "typescript": "7.0.2"
+  },
+  "workspaces": [
+    "vendor/effect-torch/packages/core",
+    "vendor/effect-torch/packages/backend-cpu",
+    "vendor/effect-torch/packages/backend-apple-native",
+    "vendor/effect-torch/packages/backend-cuda",
+    "vendor/effect-torch/packages/tokenizers"
+  ],
+  "overrides": {
+    "effect": "4.0.2"
   }
 }
