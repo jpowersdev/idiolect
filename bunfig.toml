@@ -1,0 +1,3 @@
+[test]
+# effect-torch has its own tests, for its own runner.
+root = "./test"

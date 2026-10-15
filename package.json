@@ -45,6 +45,7 @@
     "vendor/effect-torch/packages/tokenizers"
   ],
   "overrides": {
+    "@types/node": "26.6.4",
     "effect": "4.0.2"
   }
 }
