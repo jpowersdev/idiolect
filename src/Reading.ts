@@ -1,5 +1,11 @@
 /** Detect the end of a spoken setup script, and save it. Pure logic; recording lives in Enroll.ts. */
-import type { Word } from "./Api.ts"
+
+/** A recognized word and when it was said, in seconds. */
+export interface Word {
+  readonly text: string
+  readonly start: number
+  readonly end: number
+}
 
 // Keep the full recording for cloning; the engine makes its own recognition copy.
 export const SampleRate = 48000

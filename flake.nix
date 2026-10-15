@@ -46,8 +46,7 @@
           dontBuild = true;
           installPhase = ''
             runHook preInstall
-            # Run from source, as the npm package does: the CLI starts src/engine/main.ts
-            # beside it with the same Bun.
+            # Run from source, as the npm package does.
             mkdir -p $out/lib/idiolect
             cp -R package.json tsconfig.json src $out/lib/idiolect/
             cp -R ${nodeModules} $out/lib/idiolect/node_modules

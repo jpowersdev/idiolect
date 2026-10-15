@@ -105,8 +105,6 @@ const decode = (speech: Speech, patches: Float32Array) =>
 
 export interface SpeakOptions {
   readonly seed: number
-  /** Checked between patches; speaking stops early when it returns true. */
-  readonly cancelled?: () => boolean
 }
 
 /** Say `text` in your voice, continuing from the clip: 48 kHz audio. */
@@ -120,10 +118,9 @@ export const speak = (speech: Speech, from: Voice, text: string, options: SpeakO
       patches = yield* VoxCpm.generate(speech.model, prompt, {
         minLength: 2,
         maxLength: runaway + 10,
-        seed: options.seed + 7919 * attempt,
-        ...(options.cancelled ? { cancelled: options.cancelled } : {})
+        seed: options.seed + 7919 * attempt
       })
-      if (patches.length < runaway || options.cancelled?.()) break
+      if (patches.length < runaway) break
     }
     const context = Math.min(CONTEXT_PATCHES, from.continuation.length / (PATCH * LATENT))
     const latents = new Float32Array((context + patches.length) * PATCH * LATENT)

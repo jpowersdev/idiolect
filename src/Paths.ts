@@ -4,7 +4,7 @@ import { homedir } from "node:os"
 import { join, resolve } from "node:path"
 
 export interface PathsShape {
-  /** Your voice, the models, the engine's socket, and its log. */
+  /** Your voice and the models. */
   readonly data: string
 }
 

@@ -1,4 +1,4 @@
-/** Record a reading until the engine's recognizer hears the end of the script. */
+/** Record a reading until the recognizer hears the end of the script. */
 import { Duration, Effect, Fiber, Stream } from "effect"
 import { Audio } from "./Audio.ts"
 import { Engine } from "./Engine.ts"
@@ -74,9 +74,7 @@ export const recordReading = Effect.fn("recordReading")(function*(options: {
     )
   })
 
-  const transcribe = (pcm: Uint8Array) =>
-    engine.call(engine.api.transcribe({ query: { sample_rate: SampleRate }, payload: pcm }))
-      .pipe(Effect.map(({ words }) => words))
+  const transcribe = (pcm: Uint8Array) => engine.transcribe(pcmSamples(pcm), SampleRate)
 
   // Listen to the last few seconds for the script's final words, then a pause.
   const listen = Effect.gen(function*() {

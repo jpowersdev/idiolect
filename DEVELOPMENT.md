@@ -1,11 +1,11 @@
 # Developing Idiolect
 
-Idiolect is one TypeScript package, written with [Effect](https://effect.website), in two processes:
+Idiolect is one TypeScript package, written with [Effect](https://effect.website), that runs in one process:
 
 - **The CLI** (`src/`): commands, the microphone and speakers, model downloads, and output files.
-- **The speech engine** (`src/engine/`): clones your voice with [VoxCPM2](https://github.com/OpenBMB/VoxCPM), and follows your reading and checks what it says with [Whisper base.en](https://huggingface.co/openai/whisper-base.en). Both models run on the GPU with [effect-torch](https://github.com/mikearnaldi/effect-torch)'s Metal backend.
+- **The speech engine** (`src/engine/`), behind the `Engine` service in `src/Engine.ts`: clones your voice with [VoxCPM2](https://github.com/OpenBMB/VoxCPM), and follows your reading and checks what it says with [Whisper base.en](https://huggingface.co/openai/whisper-base.en). Both models run on the GPU with [effect-torch](https://github.com/mikearnaldi/effect-torch)'s Metal backend.
 
-The CLI starts the engine in the background, with the same Bun, and talks to it over a Unix socket in the data folder. The engine keeps the models loaded between commands and exits after 10 idle minutes. Their contract is defined once, as an Effect `HttpApi`, in `src/Api.ts`; the CLI uses its typed client and the engine implements it with `HttpApiBuilder`.
+Each command loads the models the first time it needs them, about 3 seconds when the model file is in the disk cache, and effect-torch's native backend with them; commands that never speak or listen never load either.
 
 ## Setup and tests
 
@@ -22,13 +22,13 @@ bun run typecheck
 IDIOLECT_MODEL_TESTS=1 bun test test/engine   # the models against captured PyTorch output
 ```
 
-The contract test serves the real engine API, with stand-ins for the models, and exercises every endpoint through the CLI's typed client, so the two sides cannot drift apart. The model tests compare VoxCPM2, its codec, and Whisper with output captured from PyTorch and Hugging Face Transformers, in `~/.idiolect/experiments`; they are skipped without it.
+The CLI's tests use a stand-in `Engine`, and the engine's tests use stand-in models. The model tests compare VoxCPM2, its codec, and Whisper with output captured from PyTorch and Hugging Face Transformers, in `~/.idiolect/experiments`; they are skipped without it.
 
 ## How speech is made
 
 - **Recording.** Setup records each script in `src/Scripts.ts` as one take, keeps it whole with its word timings (for fine-tuning later), and cuts it into clips that end at sentences. Adding scripts grows the dataset.
 - **Cloning.** The engine continues from the first clip that ends a sentence, which is also the cloning reference, as VoxCPM's own generate does with the same settings (`src/engine/Speech.ts`). The language models run in bfloat16, about 5 GB; the codec runs in float32.
-- **Rendering.** Text is split into sections by paragraph, then by sentence. Each section is checked with the recognizer, rendered again if garbled or faded, cut where its last words end, and level-matched before joining (`src/engine/Renders.ts`).
+- **Rendering.** Text is split into sections by paragraph, then by sentence. Each section is checked with the recognizer, rendered again if garbled or faded, cut where its last words end, and level-matched before joining (`src/engine/Render.ts`).
 - **Models.** `src/Models.ts` pins each model's revision and files, with their sizes and SHA-256; setup downloads them, after asking. The codec's weights are read straight from `audiovae.pth` (`src/engine/Pth.ts`).
 
 ## Releasing

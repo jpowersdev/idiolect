@@ -294,8 +294,6 @@ export interface GenerateOptions {
   readonly minLength: number
   readonly maxLength: number
   readonly seed: number
-  /** Checked between patches; generation stops early when it returns true. */
-  readonly cancelled?: () => boolean
   /** Each patch's starting noise, [4, 64] time-major; otherwise drawn from `seed`. */
   readonly noise?: (patch: number) => Float32Array
 }
@@ -342,7 +340,6 @@ export const generate = (model: Model, prompt: Prompt, options: GenerateOptions)
     const times = yield* Effect.forEach(schedule, (t) => typed(timeEmbedding(t), [1, DIT]))
     const patches: Array<Float32Array> = []
     for (let i = 0; i < options.maxLength; i++) {
-      if (options.cancelled?.()) break
       // Flow matching: Euler steps from noise at the schedule's times; the first is skipped (CFG-zero*).
       let x: T = yield* typed(options.noise?.(i) ?? noise(PATCH * LATENT), [1, PATCH, LATENT])
       for (let s = 2; s <= TIMESTEPS; s++) {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import type { Word } from "../../src/Api.ts"
+import type { Word } from "../../src/Reading.ts"
 import { clipRanges, coverage, endsSentence, PARAGRAPH_PAUSE, planClips, SENTENCE_PAUSE, speechEnd, splitScript } from "../../src/engine/Sections.ts"
 
 /** A word every half second; every `sentence`th word, and the last, ends a sentence. */

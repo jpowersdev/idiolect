@@ -8,7 +8,7 @@ import { Safetensors, Tensor } from "@effect-torch/core"
 import { Effect } from "effect"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
-import type { Word } from "../Api.ts"
+import type { Word } from "../Reading.ts"
 import { release } from "./MiniCpm.ts"
 
 type T = Tensor.Any

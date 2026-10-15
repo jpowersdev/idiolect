@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Exit, Fiber, Layer } from "effect"
+import { Console, Effect, Exit, Layer } from "effect"
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { IdiolectError } from "../src/Errors.ts"
 import { checkOutput, inputText, playRender, publish, renderVoice } from "../src/Library.ts"
-import { fakeAudio, fakeEngine, render, temporaryDirectory } from "./support.ts"
+import { fakeAudio, fakeEngine, temporaryDirectory } from "./support.ts"
 
 const text = (options: Partial<Parameters<typeof inputText>[0]>) =>
   inputText({ words: [], stdinIsTTY: true, readStdin: () => "", ...options })
@@ -34,34 +34,18 @@ describe("saving audio", () => {
   })
 })
 
-test("interrupting a render cancels that render", async () => {
-  const cancelled: Array<string> = []
+test("speaking shows each step, and its failures in words", async () => {
+  const shown: Array<string> = []
   const engine = fakeEngine({
-    generate: () => Effect.succeed(render()),
-    render: () => Effect.succeed(render({ status: "generating", message: "Rendering section 1 of 2…" })),
-    cancel: ({ params }: { params: { id: string } }) =>
-      Effect.sync(() => {
-        cancelled.push(params.id)
-        return render({ status: "cancelled" })
-      })
+    speak: (_text, progress) => Effect.andThen(progress("Rendering section 1 of 1…"), Effect.fail(new IdiolectError({ message: "The speech model is missing. Run idiolect setup first." })))
   })
-  const exit = await Effect.runPromise(
-    Effect.gen(function*() {
-      const fiber = yield* Effect.forkChild(renderVoice("Hello"))
-      yield* Effect.sleep("700 millis")
-      return yield* Fiber.interrupt(fiber).pipe(Effect.andThen(Fiber.await(fiber)))
-    }).pipe(Effect.provide(engine))
-  )
-  expect(Exit.hasInterrupts(exit)).toBe(true)
-  expect(cancelled).toEqual(["take123"])
-})
-
-test("a failed render reports the engine's message", async () => {
-  const engine = fakeEngine({
-    generate: () => Effect.succeed(render({ status: "failed", message: "The GPU ran out of memory." }))
-  })
-  const error = await Effect.runPromise(renderVoice("Hello").pipe(Effect.flip, Effect.provide(engine)))
-  expect(error.message).toBe("The GPU ran out of memory.")
+  const error = await Effect.runPromise(renderVoice("Hello").pipe(
+    Effect.flip,
+    Effect.provide(engine),
+    Effect.provideService(Console.Console, { ...globalThis.console, error: (message: string) => shown.push(message) } as never)
+  ))
+  expect(shown).toEqual(["Rendering section 1 of 1…"])
+  expect(error.message).toContain("Run idiolect setup")
 })
 
 describe("playback", () => {
@@ -69,7 +53,6 @@ describe("playback", () => {
     test(failure ? "a player error still removes the temporary audio" : "plays and removes the temporary audio", async () => {
       const played: Array<string> = []
       const layer = Layer.mergeAll(
-        fakeEngine({ audio: () => Effect.succeed(new TextEncoder().encode("generated audio")) }),
         fakeAudio({
           play: (path) =>
             Effect.suspend(() => {
@@ -79,7 +62,7 @@ describe("playback", () => {
             })
         })
       )
-      const exit = await Effect.runPromiseExit(playRender(render({ status: "ready", duration: 1.5 })).pipe(Effect.provide(layer)))
+      const exit = await Effect.runPromiseExit(playRender({ wav: new TextEncoder().encode("generated audio"), duration: 1.5 }).pipe(Effect.provide(layer)))
       expect(Exit.isFailure(exit)).toBe(failure)
       expect(played.length).toBe(1)
       expect(existsSync(played[0]!)).toBe(false)

@@ -3,8 +3,7 @@
  * in, checking a rendered section against the recognizer, and planning the clips a take is cut
  * into. Words are compared with the same rules setup uses to hear the end of a reading.
  */
-import type { Word } from "../Api.ts"
-import { sameWord, tokens } from "../Reading.ts"
+import { sameWord, tokens, type Word } from "../Reading.ts"
 
 // Longer sections tend to fade out toward the end.
 export const SECTION_CHARACTERS = 200

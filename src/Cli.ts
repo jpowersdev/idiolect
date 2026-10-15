@@ -9,7 +9,7 @@ import { Audio } from "./Audio.ts"
 import { Engine } from "./Engine.ts"
 import { recordReading } from "./Enroll.ts"
 import { fail, IdiolectError } from "./Errors.ts"
-import { attempt, checkOutput, inputText, playRender, publish, renderAudio, renderVoice } from "./Library.ts"
+import { attempt, checkOutput, inputText, playRender, publish, renderVoice } from "./Library.ts"
 import { download, downloaded, gigabytes, missingBytes, Models } from "./Models.ts"
 import { Paths } from "./Paths.ts"
 import type { SavedReading } from "./Reading.ts"
@@ -127,9 +127,8 @@ const enroll = Effect.fn("enroll")(function*(options: { readonly device: Option.
     if (!agreed) return yield* Console.log("Nothing downloaded. Run idiolect setup when you are ready.")
     yield* downloadModels(paths.data)
   }
-  yield* engine.ensure
-  const previous = yield* engine.call(engine.api.voice()).pipe(Effect.option)
-  if (Option.isSome(previous) && !(yield* confirm("\nYou already have a voice. Record a new one?", false))) {
+  const previous = yield* engine.hasVoice
+  if (previous && !(yield* confirm("\nYou already have a voice. Record a new one?", false))) {
     return yield* Console.log("Everything is ready. Try: idiolect say \"This is my voice, reading something new.\"")
   }
   const device = Option.getOrUndefined(options.device)
@@ -138,7 +137,7 @@ const enroll = Effect.fn("enroll")(function*(options: { readonly device: Option.
   yield* Console.log("Let each script carry you: tell the story, explain the steps, chat with a friend.")
   yield* Console.log("Each recording stops by itself shortly after you read the script's final words.")
   yield* Console.log(device ? `Microphone: ${device}` : "Using your default microphone. Use --device to choose another.")
-  if (Option.isSome(previous)) yield* Console.log("Your current voice stays until you finish every script.")
+  if (previous) yield* Console.log("Your current voice stays until you finish every script.")
 
   const progress = ({ heard, seconds }: { readonly heard: string; readonly seconds: number }) =>
     Effect.sync(() => {
@@ -179,17 +178,13 @@ const enroll = Effect.fn("enroll")(function*(options: { readonly device: Option.
     takes.push({ script, reading: reading.value })
   }
 
-  const form = new FormData()
-  form.append("takes", JSON.stringify(takes.map(({ reading, script }) => ({
+  yield* engine.saveVoice(takes.map(({ reading, script }) => ({
     script: script.id,
     transcript: reading.transcript,
     words: reading.words,
+    wav: reading.wav,
     ...(script.notice ? { notice: script.notice } : {})
-  }))))
-  for (const { reading, script } of takes) {
-    form.append("audio", new Blob([reading.wav as Uint8Array<ArrayBuffer>], { type: "audio/wav" }), `${script.id}.wav`)
-  }
-  yield* engine.call(engine.api.replaceVoice({ payload: form }))
+  })))
   yield* Console.log("\nSaved your voice. Now listen to a few new sentences in it.")
   yield* renderVoice(PreviewText).pipe(
     Effect.flatMap(playRender),
@@ -228,15 +223,13 @@ const say = Command.make("say", {
     } else {
       yield* (yield* Audio).check
     }
-    yield* (yield* Engine).ensure
-    const job = yield* renderVoice(text)
+    const spoken = yield* renderVoice(text)
     if (Option.isSome(output)) {
-      const bytes = yield* renderAudio(job)
-      yield* attempt(() => publish(bytes, output.value))
-      yield* Console.error(`Saved ${job.duration ?? 0}s of audio.`)
+      yield* attempt(() => publish(spoken.wav, output.value))
+      yield* Console.error(`Saved ${spoken.duration}s of audio.`)
       yield* Console.log(output.value)
     } else {
-      yield* playRender(job)
+      yield* playRender(spoken)
     }
   })).pipe(Command.withDescription("Speak text in your voice, or save it with --output"))
 

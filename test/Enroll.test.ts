@@ -25,10 +25,10 @@ const microphone = (seconds: number, value: number, stops = false) =>
 test("stops once the ending and a pause are heard, then saves the whole take", async () => {
   const payloads: Array<number> = []
   const engine = fakeEngine({
-    transcribe: ({ payload }: { payload: Uint8Array }) =>
+    transcribe: (pcm) =>
       Effect.sync(() => {
-        payloads.push(payload.length)
-        return { words: words(script, 0.5) }
+        payloads.push(pcm.byteLength)
+        return words(script, 0.5)
       })
   })
   const reading = await Effect.runPromise(
@@ -46,11 +46,11 @@ test("stops once the ending and a pause are heard, then saves the whole take", a
 test("listening only sends the most recent seconds", async () => {
   const payloads: Array<number> = []
   const engine = fakeEngine({
-    transcribe: ({ payload }: { payload: Uint8Array }) =>
+    transcribe: (pcm) =>
       Effect.sync(() => {
-        payloads.push(payload.length)
+        payloads.push(pcm.byteLength)
         // The ending arrives after more than 8 seconds of recording.
-        return { words: payloads.length > 16 ? words(script, 1) : words("A quiet morning", 1) }
+        return payloads.length > 16 ? words(script, 1) : words("A quiet morning", 1)
       })
   })
   await Effect.runPromise(
@@ -63,7 +63,7 @@ test("listening only sends the most recent seconds", async () => {
 }, 30_000)
 
 test("a silent microphone is reported quickly, with how to fix it", async () => {
-  const engine = fakeEngine({ transcribe: () => Effect.succeed({ words: [] }) })
+  const engine = fakeEngine({ transcribe: () => Effect.succeed([]) })
   const started = Date.now()
   const error = await Effect.runPromise(
     recordReading({ script, device: undefined, progress: () => Effect.void, heardEnd: Effect.void }).pipe(
@@ -76,7 +76,7 @@ test("a silent microphone is reported quickly, with how to fix it", async () => 
 }, 20_000)
 
 test("a recorder that stops is reported with its diagnostics", async () => {
-  const engine = fakeEngine({ transcribe: () => Effect.succeed({ words: [] }) })
+  const engine = fakeEngine({ transcribe: () => Effect.succeed([]) })
   const error = await Effect.runPromise(
     recordReading({ script, device: undefined, progress: () => Effect.void, heardEnd: Effect.void }).pipe(
       Effect.flip,
