@@ -2,14 +2,15 @@
 import { Console, Effect, Option } from "effect"
 import { Argument, Command, Flag } from "effect/cli"
 import { existsSync, readFileSync } from "node:fs"
+import { totalmem } from "node:os"
 import { createInterface } from "node:readline"
-import { resolve } from "node:path"
+import { join, resolve } from "node:path"
 import { Audio } from "./Audio.ts"
 import { Engine } from "./Engine.ts"
 import { recordReading } from "./Enroll.ts"
 import { fail, IdiolectError } from "./Errors.ts"
-import { install, locate, notInstalled, Version } from "./Install.ts"
 import { attempt, checkOutput, inputText, playRender, publish, renderAudio, renderVoice } from "./Library.ts"
+import { download, downloaded, gigabytes, missingBytes, Models } from "./Models.ts"
 import { Paths } from "./Paths.ts"
 import type { SavedReading } from "./Reading.ts"
 import { type Script, Scripts } from "./Scripts.ts"
@@ -17,10 +18,25 @@ import { type Script, Scripts } from "./Scripts.ts"
 export const PreviewText = "Here is something I never read aloud. Does this sound like me? " +
   "A familiar voice can tell a completely new story."
 
-/** Exit codes from foreground engine commands become this process's exit code. */
-const exitWith = (code: number) => Effect.sync(() => {
-  if (code !== 0) process.exitCode = code
-})
+/** Idiolect runs its models with effect-torch's Metal backend, so on Apple silicon for now. */
+const supportedHardware = process.platform === "darwin" && process.arch === "arm64"
+/** VoxCPM2 takes about 5 GB in bfloat16; the rest is for everything else on the machine. */
+const RecommendedMemory = 16 * 2 ** 30
+
+/** Download whatever models are missing, showing each file's progress on one line. */
+const downloadModels = (data: string) =>
+  Effect.gen(function*() {
+    for (const model of Models) {
+      let shown = ""
+      yield* download(data, model, ({ file, received }) => {
+        const line = `Downloading ${model.name}: ${file.name} ${Math.floor((received / file.size) * 100)}% of ${gigabytes(file.size)}`
+        if (line !== shown) process.stderr.write(`\r\x1b[K${line}`)
+        shown = line
+      })
+      if (shown) process.stderr.write("\n")
+    }
+    yield* Console.error("Models ready.")
+  })
 
 const wrap = (text: string, width = 72) =>
   text.split(" ").reduce<Array<string>>((lines, word) => {
@@ -100,29 +116,18 @@ const enroll = Effect.fn("enroll")(function*(options: { readonly device: Option.
   const audio = yield* Audio
   const paths = yield* Paths
   yield* audio.check
+  if (!supportedHardware) return yield* fail("Idiolect needs an Apple silicon Mac for now.")
 
-  // Install only what is missing, and only once you agree.
-  const location = locate(paths)
-  if (location._tag === "Missing") return yield* notInstalled
-  if (location._tag === "Managed" && !location.current) {
-    const updating = existsSync(location.command)
+  // Download only what is missing, and only once you agree.
+  const missing = missingBytes(paths.data)
+  if (missing > 0) {
     const agreed = yield* confirm(
-      updating
-        ? `\nThe speech engine needs updating for Idiolect ${Version}. Update it now?`
-        : `\nIdiolect needs to install its speech engine (Python and PyTorch, about 1 GB) in ${paths.data}. Install it now?`
-    )
-    if (!agreed) return yield* Console.log("Nothing installed. Run idiolect setup when you are ready.")
-    yield* install(paths, updating)
-  }
-  const status = yield* engine.ensure
-  if (!status.recognizer_downloaded || !status.model_downloaded) {
-    const agreed = yield* confirm(
-      `\nIdiolect needs to download its speech and reading models (about 5 GB) to ${paths.data}. Download them now?`
+      `\nIdiolect needs to download its speech and reading models (${gigabytes(missing)}) to ${join(paths.data, "models")}. Download them now?`
     )
     if (!agreed) return yield* Console.log("Nothing downloaded. Run idiolect setup when you are ready.")
-    const code = yield* engine.foreground(["download"])
-    if (code !== 0) return yield* fail("The models could not be downloaded. Run idiolect setup to try again.")
+    yield* downloadModels(paths.data)
   }
+  yield* engine.ensure
   const previous = yield* engine.call(engine.api.voice()).pipe(Effect.option)
   if (Option.isSome(previous) && !(yield* confirm("\nYou already have a voice. Record a new one?", false))) {
     return yield* Console.log("Everything is ready. Try: idiolect say \"This is my voice, reading something new.\"")
@@ -237,31 +242,33 @@ const say = Command.make("say", {
 
 const doctor = Command.make("doctor", {}, () =>
   Effect.gen(function*() {
+    // Report only; setup downloads what is missing.
+    const { data } = yield* Paths
+    let ready = true
+    const report = (name: string, ok: boolean, detail: string) => {
+      if (!ok) ready = false
+      return Console.log(`${name}: ${detail}`)
+    }
     const sox = yield* (yield* Audio).check.pipe(Effect.result)
-    yield* Console.log(sox._tag === "Success" ? "SoX: ready" : `SoX: ${sox.failure.message}`)
-    // Report the engine without installing it; setup does that.
-    const location = locate(yield* Paths)
-    if (location._tag === "Missing") {
-      yield* Console.log(`Engine: ${notInstalled.message}`)
-      return yield* exitWith(1)
+    yield* report("SoX", sox._tag === "Success", sox._tag === "Success" ? "ready" : sox.failure.message)
+    yield* report("GPU", supportedHardware, supportedHardware ? "Apple silicon (Metal)" : "Idiolect needs an Apple silicon Mac for now")
+    const backend = yield* Effect.tryPromise(() => import("@effect-torch/backend-apple-native")).pipe(Effect.result)
+    yield* report(
+      "effect-torch",
+      backend._tag === "Success",
+      backend._tag === "Success" ? "ready" : `the Metal backend did not load (in a checkout, run bun run build-native): ${backend.failure.message}`
+    )
+    const memory = totalmem()
+    yield* Console.log(`Memory: ${Math.round(memory / 2 ** 30)} GB${memory < RecommendedMemory ? " (16 GB or more recommended; speaking may be slow)" : ""}`)
+    for (const model of Models) {
+      const present = downloaded(data, model)
+      yield* report(model.name, present, present ? "ready" : "not downloaded (idiolect setup downloads it)")
     }
-    if (location._tag === "OnPath") {
-      yield* Console.log(`Engine: ${location.command}`)
-    } else {
-      yield* Console.log(Bun.which("uv") === null ? "uv: missing (brew install uv)" : "uv: ready")
-      if (!location.current) {
-        yield* Console.log(
-          existsSync(location.command)
-            ? `Engine: needs updating for ${Version} (idiolect setup updates it)`
-            : "Engine: not installed yet (idiolect setup installs it)"
-        )
-        return yield* exitWith(1)
-      }
-      yield* Console.log(`Engine: ${Version}`)
-    }
-    const code = yield* (yield* Engine).foreground(["doctor"])
-    yield* exitWith(sox._tag === "Success" ? code : 1)
-  })).pipe(Command.withDescription("Check the GPU, models, engine, and audio tools"))
+    const voice = existsSync(join(data, "voice", "voice.json"))
+    yield* Console.log(`Voice: ${voice ? "recorded" : "not recorded yet (idiolect setup records it)"}`)
+    yield* Console.log(`Data: ${data}`)
+    if (!ready) process.exitCode = 1
+  })).pipe(Command.withDescription("Check the GPU, models, and audio tools"))
 
 export const idiolect = Command.make("idiolect").pipe(
   Command.withDescription("Local voice cloning from the terminal"),

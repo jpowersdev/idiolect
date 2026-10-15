@@ -2,14 +2,17 @@
 import { Context, Duration, Effect, Layer, Option } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientError } from "effect/http"
 import { HttpApiClient } from "effect/http-api"
-import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { spawn } from "node:child_process"
 import { closeSync, openSync, readFileSync } from "node:fs"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { ApiVersion, EngineApi, EngineGroup, type Status } from "./Api.ts"
 import { fail, IdiolectError } from "./Errors.ts"
-import { engineExecutable, Version } from "./Install.ts"
 import { Paths, type PathsShape } from "./Paths.ts"
+import packageJson from "../package.json" with { type: "json" }
+
+export const Version = packageJson.version
+/** The engine runs from this same package, with the Bun running the CLI. */
+export const EngineEntry = resolve(import.meta.dir, "engine", "main.ts")
 
 type Client = HttpApiClient.Client<typeof EngineGroup>
 
@@ -21,32 +24,14 @@ export interface EngineShape {
   readonly probe: Effect.Effect<Option.Option<Status>, IdiolectError>
   /** Start the engine in the background unless a compatible one is already running. */
   readonly ensure: Effect.Effect<Status, IdiolectError>
-  /** Run `idiolect-engine download|doctor` attached to this terminal. */
-  readonly foreground: (args: ReadonlyArray<string>) => Effect.Effect<number, IdiolectError>
 }
 
-/** The model IDIOLECT_MODEL asks for, when set; otherwise the engine chooses for the hardware. */
-export const requestedModel = (env: Readonly<Record<string, string | undefined>>) =>
-  env.IDIOLECT_MODEL?.trim().toLowerCase() || undefined
-
-/** IDIOLECT_MODEL set: the engine must use that model. Unset: one chosen for the hardware. */
-export const usesWantedModel = (status: Pick<Status, "model" | "model_requested">, wanted: string | undefined) =>
-  wanted === undefined ? !status.model_requested : status.model === wanted
-
 export const socketPath = (paths: PathsShape) => join(paths.data, "engine.sock")
-
-export const engineEnvironment = (paths: PathsShape): Record<string, string> => ({
-  IDIOLECT_DATA: paths.data,
-  HF_HUB_DISABLE_TELEMETRY: "1",
-  DO_NOT_TRACK: "1",
-  TOKENIZERS_PARALLELISM: "false",
-  OMP_NUM_THREADS: "8"
-})
 
 /** The engine's final error from its log, e.g. another engine already owning the data. */
 const lastError = (log: string) => {
   try {
-    const line = readFileSync(log, "utf8").split("\n").findLast((line) => /^\w*(Error|Exception): /.test(line))
+    const line = readFileSync(log, "utf8").split("\n").findLast((line) => /^Error: /.test(line))
     return line ? `: ${line.replace(/^\w+: /, "").replace(/\.$/, "")}` : ""
   } catch {
     return ""
@@ -78,7 +63,6 @@ export class Engine extends Context.Service<Engine, EngineShape>()("idiolect/Eng
     Engine,
     Effect.gen(function*() {
       const paths = yield* Paths
-      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
       const socket = socketPath(paths)
       const client = yield* HttpApiClient.make(EngineApi, {
         baseUrl: "http://localhost",
@@ -89,9 +73,7 @@ export class Engine extends Context.Service<Engine, EngineShape>()("idiolect/Eng
       })
       const api = client.engine
       const call = <A, E>(effect: Effect.Effect<A, E>) => Effect.mapError(effect, explain)
-      const environment = engineEnvironment(paths)
       const log = join(paths.data, "engine.log")
-      const executable = engineExecutable(paths)
 
       const status = api.status().pipe(
         Effect.timeout(Duration.seconds(2)),
@@ -103,7 +85,7 @@ export class Engine extends Context.Service<Engine, EngineShape>()("idiolect/Eng
         )
       )
 
-      /** A running engine that is not the one wanted (say, before an upgrade) is replaced once idle. */
+      /** A running engine from another release (say, before an upgrade) is replaced once idle. */
       const retire = (why: string) =>
         Effect.gen(function*() {
           yield* call(api.shutdown()).pipe(
@@ -123,25 +105,20 @@ export class Engine extends Context.Service<Engine, EngineShape>()("idiolect/Eng
           yield* retire("from another Idiolect version")
           return Option.none<Status>()
         }
-        if (!usesWantedModel(running.value, requestedModel(process.env))) {
-          yield* retire(`using ${running.value.model}`)
-          return Option.none<Status>()
-        }
         return running
       })
 
-      const start = (command: string) =>
-        Effect.try({
-          try: () => {
+      const start = Effect.try({
+        try: () => {
           const output = openSync(log, "a")
           try {
             // Detached so the engine keeps the model loaded after this command exits.
             // It exits by itself once idle.
-            const child = spawn(command, ["serve"], {
+            const child = spawn(process.execPath, [EngineEntry], {
               detached: true,
               stdio: ["ignore", output, output],
               cwd: paths.data,
-              env: { ...process.env, ...environment }
+              env: { ...process.env, IDIOLECT_DATA: paths.data }
             })
             const state = { exited: false }
             child.on("exit", () => {
@@ -162,9 +139,8 @@ export class Engine extends Context.Service<Engine, EngineShape>()("idiolect/Eng
       const ensure = Effect.gen(function*() {
         const running = yield* probe
         if (Option.isSome(running)) return running.value
-        const command = yield* executable
         process.stderr.write("Starting the local voice engine…\n")
-        const child = yield* start(command)
+        const child = yield* start
         // Another command may start an engine at the same moment; either one will do.
         for (let attempt = 0; attempt < 300; attempt++) {
           const started = yield* status
@@ -175,27 +151,7 @@ export class Engine extends Context.Service<Engine, EngineShape>()("idiolect/Eng
         return yield* fail(`The local engine could not start${lastError(log)}. See ${log}.`)
       })
 
-      const foreground = (args: ReadonlyArray<string>) =>
-        Effect.gen(function*() {
-          const command = yield* executable
-          const handle = yield* spawner.spawn(
-            ChildProcess.make(command, args, {
-              env: environment,
-              extendEnv: true,
-              stdin: "inherit",
-              stdout: "inherit",
-              stderr: "inherit"
-            })
-          )
-          return Number(yield* handle.exitCode)
-        }).pipe(
-          Effect.scoped,
-          Effect.mapError((error) =>
-            error instanceof IdiolectError ? error : fail(`The engine command failed: ${error.message}`)
-          )
-        )
-
-      return Engine.of({ api, call, probe, ensure, foreground })
+      return Engine.of({ api, call, probe, ensure })
     })
   ).pipe(Layer.provide(FetchHttpClient.layer))
 }

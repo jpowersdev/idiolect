@@ -14,12 +14,12 @@ idiolect doctor                                 # Check your Mac, models, and au
 You need an Apple silicon Mac with at least 16 GB of memory.
 
 ```sh
-brew install bun uv sox
+brew install bun sox
 bun add -g @jpowersdev/idiolect
 idiolect setup
 ```
 
-Setup installs the speech engine and downloads the models the first time, after asking.
+Setup downloads the models the first time, after asking.
 
 With Nix, run it directly:
 
@@ -31,11 +31,11 @@ Or add `github:jpowersdev/idiolect` as a flake input and put `inputs.idiolect.pa
 
 ## Record your voice
 
-Run `idiolect setup`. The first time, it asks to install the speech engine (about 1 GB) and download the models (about 5 GB). Then it shows six short scripts, about four minutes of reading in all. For each one, press Enter and read it in your everyday voice. Recording stops by itself after the last words; press `r` to start a script over. Afterwards, setup plays a few sentences in your new voice.
+Run `idiolect setup`. The first time, it asks to download the models (about 5 GB). Then it shows six short scripts, about four minutes of reading in all. For each one, press Enter and read it in your everyday voice. Recording stops by itself after the last words; press `r` to start a script over. Afterwards, setup plays a few sentences in your new voice.
 
 Use a quiet room and sit close to the microphone. To use a microphone other than the default, pass `--device "MacBook Pro Microphone"` (or another input's name). If setup only hears silence, give your terminal app microphone access in System Settings → Privacy & Security → Microphone.
 
-Running setup again installs anything missing, such as an engine update after you upgrade Idiolect, and asks whether to record a new voice. Only clone voices you have permission to use.
+Running setup again downloads anything missing and asks whether to record a new voice. Only clone voices you have permission to use.
 
 ## Speak
 
@@ -49,7 +49,7 @@ Without `-o`, Idiolect plays the audio. With `-o`, it saves a WAV file. Blank li
 
 ## Good to know
 
-- Idiolect picks a speech model for your Mac: VoxCPM2 with 24 GB of memory or more, otherwise Qwen3-TTS. `idiolect doctor` says which. To choose yourself, set `IDIOLECT_MODEL=voxcpm2` or `IDIOLECT_MODEL=qwen3`.
+- Idiolect speaks with [VoxCPM2](https://github.com/OpenBMB/VoxCPM) and listens with [Whisper](https://github.com/openai/whisper), both running on your Mac's GPU.
 - Your voice and the models live in `~/.idiolect`. Set `IDIOLECT_DATA` to use another folder.
 - After setup, nothing leaves your Mac.
 

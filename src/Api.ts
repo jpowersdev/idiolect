@@ -1,14 +1,14 @@
 /**
- * The HTTP contract between the CLI and a local speech engine.
- *
- * The Python engine in engine/ implements it today. Any engine that serves
- * these endpoints on the data directory's engine.sock, and reports
- * `api: ApiVersion`, can replace it.
+ * The HTTP contract between the CLI and its local speech engine (src/engine/), served on the
+ * data directory's engine.sock. The engine runs in its own process so the models stay loaded
+ * between commands.
  */
 import { Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiSchema } from "effect/http-api"
 
-export const ApiVersion = 1
+export const ApiVersion = 2
+/** The longest script one render takes, in characters. */
+export const MaxScriptLength = 12000
 
 export const Status = Schema.Struct({
   service: Schema.Literal("idiolect"),
@@ -16,10 +16,8 @@ export const Status = Schema.Struct({
   /** The engine's release, which must match the CLI's. */
   version: Schema.String,
   pid: Schema.Int,
-  /** Which speech model the engine uses: chosen for the hardware, or set by IDIOLECT_MODEL. */
+  /** The speech model. */
   model: Schema.String,
-  /** True when IDIOLECT_MODEL chose the model, rather than the engine choosing for the hardware. */
-  model_requested: Schema.Boolean,
   model_downloaded: Schema.Boolean,
   recognizer_downloaded: Schema.Boolean,
   model_status: Schema.String
@@ -62,19 +60,12 @@ export const Word = Schema.Struct({
 })
 export type Word = typeof Word.Type
 
-/** Every engine error is a status code and a message for the person at the terminal. */
-const failure = <const Id extends string>(id: Id, status: number) =>
-  Schema.Struct({ detail: Schema.String }).pipe(
-    HttpApiSchema.status(status),
-    (schema) => schema.annotate({ identifier: id })
-  )
-
-export const NotFound = failure("NotFound", 404)
-export const Conflict = failure("Conflict", 409)
-export const TooLarge = failure("TooLarge", 413)
-export const Invalid = failure("Invalid", 422)
-export const Busy = failure("Busy", 429)
-export type EngineFailure = { readonly detail: string }
+// Every engine error is a status code and a message for the person at the terminal.
+export class NotFound extends Schema.TaggedError<NotFound>()("NotFound", { detail: Schema.String }, { httpApiStatus: 404 }) {}
+export class Conflict extends Schema.TaggedError<Conflict>()("Conflict", { detail: Schema.String }, { httpApiStatus: 409 }) {}
+export class TooLarge extends Schema.TaggedError<TooLarge>()("TooLarge", { detail: Schema.String }, { httpApiStatus: 413 }) {}
+export class Invalid extends Schema.TaggedError<Invalid>()("Invalid", { detail: Schema.String }, { httpApiStatus: 422 }) {}
+export class Busy extends Schema.TaggedError<Busy>()("Busy", { detail: Schema.String }, { httpApiStatus: 429 }) {}
 
 const RenderId = { id: Schema.String }
 

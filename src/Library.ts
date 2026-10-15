@@ -3,12 +3,10 @@ import { Console, Duration, Effect } from "effect"
 import { existsSync, mkdtempSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { activeStatuses, type Render } from "./Api.ts"
+import { activeStatuses, MaxScriptLength, type Render } from "./Api.ts"
 import { Audio } from "./Audio.ts"
 import { Engine } from "./Engine.ts"
 import { fail } from "./Errors.ts"
-
-export const MaxScriptLength = 12000
 
 /** Words on the command line, or piped input. */
 export const inputText = (options: {

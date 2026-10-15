@@ -1,39 +1,13 @@
 /**
- * Drive the real Python HTTP API (with model stand-ins) through the typed client,
- * so the Effect contract in src/Api.ts and engine/ cannot drift apart.
+ * Drive the real engine API (with stand-in models) through the CLI's typed client, so the
+ * client and server sides of src/Api.ts cannot drift apart.
  */
-import { afterAll, beforeAll, expect, test } from "bun:test"
+import { expect, test } from "bun:test"
 import { BunServices } from "@effect/platform-bun"
 import { Effect, Layer, Option } from "effect"
-import { type ChildProcess, spawn } from "node:child_process"
-import { existsSync } from "node:fs"
-import { join, resolve } from "node:path"
 import { Engine } from "../src/Engine.ts"
 import { encodeWav } from "../src/Reading.ts"
-import { fakePaths, temporaryDirectory } from "./support.ts"
-
-const engineRoot = resolve(import.meta.dir, "..", "engine")
-const python = join(engineRoot, ".venv", "bin", "python")
-const available = existsSync(python)
-const data = temporaryDirectory()
-let server: ChildProcess | undefined
-
-const run = <A, E>(effect: Effect.Effect<A, E, Engine>) =>
-  Effect.runPromise(effect.pipe(
-    Effect.provide(Engine.layer.pipe(Layer.provide(fakePaths(data)), Layer.provide(BunServices.layer)))
-  ))
-
-beforeAll(async () => {
-  if (!available) return
-  server = spawn(python, ["tests/contract_server.py", data], { cwd: engineRoot, stdio: "inherit" })
-  for (let attempt = 0; attempt < 100; attempt++) {
-    if (Option.isSome(await run(Effect.flatMap(Engine, (engine) => engine.probe)))) return
-    await Bun.sleep(100)
-  }
-  throw new Error("The contract server did not start")
-})
-
-afterAll(() => server?.kill())
+import { fakePaths, startEngine, temporaryDirectory } from "./support.ts"
 
 const sine = (seconds: number) =>
   encodeWav(Int16Array.from({ length: seconds * 48000 }, (_, i) => Math.round(6000 * Math.sin(i / 20))), 48000)
@@ -50,11 +24,13 @@ const recording = (takes: ReadonlyArray<{ script: string; text: string; seconds:
   return form
 }
 
-test.skipIf(!available)("the engine implements the CLI's contract", async () => {
-  await run(Effect.gen(function*() {
+test("the engine implements the CLI's contract", async () => {
+  const data = temporaryDirectory()
+  const served = await startEngine(data)
+  await Effect.runPromise(Effect.gen(function*() {
     const engine = yield* Engine
     const status = yield* engine.ensure
-    expect(status).toMatchObject({ service: "idiolect", api: 1, model: "voxcpm2" })
+    expect(status).toMatchObject({ service: "idiolect", api: 2, model: "voxcpm2", model_downloaded: true })
 
     const noVoice = yield* engine.call(engine.api.voice()).pipe(Effect.flip)
     expect(noVoice.message).toBe("Record your voice first with idiolect setup.")
@@ -81,18 +57,25 @@ test.skipIf(!available)("the engine implements the CLI's contract", async () => 
 
     const busy = yield* engine.call(engine.api.shutdown()).pipe(Effect.flip)
     expect(busy.message).toContain("active render")
-    expect((yield* engine.call(engine.api.cancel({ params: { id: job.id } }))).status).toBe("cancelled")
+    yield* engine.call(engine.api.cancel({ params: { id: job.id } }))
+    let cancelled = yield* engine.call(engine.api.render({ params: { id: job.id } }))
+    for (let attempt = 0; attempt < 100 && cancelled.status !== "cancelled"; attempt++) {
+      yield* Effect.sleep("20 millis")
+      cancelled = yield* engine.call(engine.api.render({ params: { id: job.id } }))
+    }
+    expect(cancelled.status).toBe("cancelled")
 
     const { words } = yield* engine.call(engine.api.transcribe({
       query: { sample_rate: 48000 },
       payload: new Uint8Array(48000 * 2)
     }))
-    expect(words).toEqual([{ text: " Hello", start: 0.5, end: 0.9 }])
+    expect(words).toEqual([{ text: "Hello", start: 0.5, end: 0.9 }])
 
     expect(yield* engine.call(engine.api.shutdown())).toEqual({ stopping: true })
     for (let attempt = 0; attempt < 50 && Option.isSome(yield* engine.probe); attempt++) {
       yield* Effect.sleep("100 millis")
     }
     expect(Option.isNone(yield* engine.probe)).toBe(true)
-  }))
+  }).pipe(Effect.provide(Engine.layer.pipe(Layer.provide(fakePaths(data)), Layer.provide(BunServices.layer)))))
+  expect(await served.exited).toBe(true)
 }, 30_000)
