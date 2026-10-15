@@ -21,7 +21,7 @@
   "scripts": {
     "start": "bun src/main.ts",
     "test": "bun test",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit -p tsconfig.check.json",
     "bundle-engine": "rm -rf dist/engine && uv build --project engine --wheel --quiet --out-dir dist/engine && uv export --project engine --frozen --no-dev --no-emit-project --format requirements-txt --quiet --output-file dist/engine/requirements.txt && rm dist/engine/.gitignore",
     "prepack": "bun run bundle-engine",
     "build-native": "scripts/build-native.sh"

@@ -1,0 +1,17 @@
+{
+  "//": "Typecheck against effect-torch's built declarations, not its sources, which follow its own compiler settings. Bun reads tsconfig.json's paths at runtime, so these live here.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@effect-torch/core": [
+        "./vendor/effect-torch/packages/core/dist/index.d.ts"
+      ],
+      "@effect-torch/backend-apple-native": [
+        "./vendor/effect-torch/packages/backend-apple-native/dist/index.d.ts"
+      ],
+      "@effect-torch/tokenizers": [
+        "./vendor/effect-torch/packages/tokenizers/dist/index.d.ts"
+      ]
+    }
+  }
+}
